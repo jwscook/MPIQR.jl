@@ -3,17 +3,18 @@ using MPIQR
 using LinearAlgebra, Random, Base.Threads
 using MPI, Distributed, MPIClusterManagers
 
-MPI.Init()
+MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const cmm = MPI.COMM_WORLD
 const rnk = MPI.Comm_rank(cmm)
 const sze = MPI.Comm_size(cmm)
 
 #include("qrmpi.jl")
-
+using Random
 Random.seed!(0)
 
-for mn in ((60, 50), (600, 500), (1200, 1000), (2400, 2000)), T in (Float64, ComplexF64)
-  m, n = mn
+for npow in 7:1:11, T in (ComplexF64, #=Float64=#)
+  n = 2^npow
+  m = n + 2^(npow-2)
   iszero(rnk) && @show T, m, n
   A0 = zeros(T, 0, 0)
   x1 = b0 = zeros(T, 0)
@@ -29,10 +30,11 @@ for mn in ((60, 50), (600, 500), (1200, 1000), (2400, 2000)), T in (Float64, Com
   xall = MPI.bcast(x1, 0, cmm)
   x1 = xall
 
-  localcols = (rnk + 1:sze:size(Aall, 2))
+  blocksize = 1
+  localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
   b = deepcopy(ball)
 
-  A = MPIQR.MPIMatrix(deepcopy(Aall[:, localcols]), size(Aall), localcols, rnk, cmm, sze)
+  A = MPIQR.MPIMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
 
   t2 = @elapsed  begin
     H, α = MPIQR.householder!(A)
