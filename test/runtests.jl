@@ -7,15 +7,23 @@ MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const cmm = MPI.COMM_WORLD
 const rnk = MPI.Comm_rank(cmm)
 const sze = MPI.Comm_size(cmm)
+const nts = Threads.nthreads()
+
+BLAS.set_num_threads(nts)
+@static if Sys.islinux()
+  using ThreadPinning
+  cpus = rnk * nts:(rnk + 1) * nts
+  ThreadPinning.pinthreads(cpus)
+end
 
 #include("qrmpi.jl")
 using Random
 Random.seed!(0)
 
-for npow in 7:1:11, T in (ComplexF64, #=Float64=#)
+for blocksize in (1, 4), npow in 7:1:10, T in (ComplexF64, )#Float64, 
   n = 2^npow
   m = n + 2^(npow-2)
-  iszero(rnk) && @show T, m, n
+  iszero(rnk) && @show T, m, n, blocksize
   A0 = zeros(T, 0, 0)
   x1 = b0 = zeros(T, 0)
   if rnk == 0
@@ -30,7 +38,6 @@ for npow in 7:1:11, T in (ComplexF64, #=Float64=#)
   xall = MPI.bcast(x1, 0, cmm)
   x1 = xall
 
-  blocksize = 1
   localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
   b = deepcopy(ball)
 

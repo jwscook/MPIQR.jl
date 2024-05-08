@@ -2,6 +2,7 @@ module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators
 using Distributed, MPI, MPIClusterManagers
+using Octavian
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
@@ -28,6 +29,8 @@ function MPIMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = 
   m, n = globalsize
   @assert mod(n, blocksize) == 0
   localcols = localcolumns(rnk, n, blocksize, commsize)
+  @assert minimum(localcols) >= 1
+  @assert maximum(localcols) <= n
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
@@ -36,23 +39,54 @@ function MPIMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = 
 
   lookupop(j) = (x = searchsortedfirst(localcols, j); isnothing(x) ? 0 : x)
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
+  @assert minimum(columnlookup) >= 0
+  @assert maximum(columnlookup) <= n
   return MPIMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, rnk, comm, commsize)
 end
 columnowner(A::MPIMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
 
 Base.size(A::MPIMatrix) = A.globalsize
-function Base.getindex(A::MPIMatrix, i, j)
-  A.localmatrix[i, A.columnlookup[j]]
-end
+localsize(A::MPIMatrix, dim=nothing) = size(A.localmatrix, dim)
+Base.getindex(A::MPIMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
+localcolindex(A::MPIMatrix, j) = A.columnlookup[j]
 function Base.setindex!(A::MPIMatrix, v::Number, i, j)
-  return A.localmatrix[i, A.columnlookup[j]] = v
+  return A.localmatrix[i, localcolindex(A, j)] = v
+end
+localcolsize(A::MPIMatrix, j) = length(localcolindex(A, j))
+
+#function hotloop!(H, Hj, y, j, ja, jz, m, n)
+#  ja > n && return nothing
+#  iters = intersect(H.localcolumns, ja:jz)
+#  @inbounds @views @threads :dynamic for jj in iters
+#    s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
+#    H[j:m, jj] .-= Hj[j:m] * s
+#  end
+#  return nothing
+#end
+function hotloop!(H::MPIMatrix{T}, Hj, y, j, ja, jz, m, n) where T
+  jz > n && return nothing
+  js = intersect(H.localcolumns, ja:jz)
+  isempty(js) && return nothing
+  lja = localcolindex(H, js[1])
+  ljz = localcolindex(H, js[end])
+  ljs = lja:ljz
+  ll = length(ljs)
+  mul!(view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz)', view(Hj, j:m))
+  if T <: Union{Float32, Float64, ComplexF32, ComplexF64}
+    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+    BLAS.ger!(-one(T), view(Hj, j:m), view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz))
+  else
+    matmul!(view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(y, 1:ll)', -1, 1)
+  end
+  return nothing
 end
 
 function householder!(H::AbstractMatrix{T}) where T
   m, n = size(H)
   α = zeros(T, min(m, n)) # Diagonal of R
-  Hj = zeros(T, m)
-  t1 = t2 = t3 = t4 = t5 = t6 =0.0
+  Hj = zeros(T, m, 1) # one column so that it works with Octavian
+  t1 = t2 = t3 = t4 = t5 = 0.0
+  y = zeros(eltype(H), localcolsize(H, 3:n))
 
   j = 1
   src = columnowner(H, j)
@@ -62,7 +96,7 @@ function householder!(H::AbstractMatrix{T}) where T
   MPI.Bcast!(Hj, H.comm; root=src)
 
   tmp = zeros(T, m)
-  t6 += @elapsed @inbounds @views for j in 1:n
+  @inbounds @views for j in 1:n
 
     t1 += @elapsed @views begin
       s = norm(Hj[j:m])
@@ -75,13 +109,7 @@ function householder!(H::AbstractMatrix{T}) where T
       @views H[j:m, j] .= Hj[j:m]
     end
 
-    t3 += @elapsed @views @inbounds for jj in intersect(H.localcolumns, j+1:j+1)
-      s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-      #s = dot(Hj[j:m], H[j:m, jj])
-      @views @simd for i in j:m
-        H[i, jj] -= Hj[i] * s
-      end
-    end
+    t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
 
     t4 += @elapsed if j + 1 <= n
       resize!(tmp, m - j)
@@ -97,19 +125,16 @@ function householder!(H::AbstractMatrix{T}) where T
       end
     end
 
-    t5 += @elapsed @inbounds @views @threads :dynamic for jj in intersect(H.localcolumns, j+2:n)
-      @inbounds s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-      #@inbounds s = dot(Hj[j:m], H[j:m, jj])
-      #s = Hj[j:m]' * H[j:m, jj]
-      @inbounds H[j:m, jj] .-= Hj[j:m] * s
-    end
+    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2, n, m, n)
 
-    t3 += @elapsed if j + 1 <= n
+    t5 += @elapsed if j + 1 <= n
       MPI.Wait(req)
       @views Hj[j+1:m] .= tmp
     end
   end
-  H.rank == 0 && @show t1, t2, t3, t4, t5, t6
+  ts = (t1, t2, t3, t4, t5)
+  sts = sum(ts)
+  H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return (H, α)
 end
 
@@ -235,7 +260,9 @@ function solve_householder!(b, H, α)
     b[i] -= bi
     b[i] /= α[i]
   end
-  H.rank == 0 && @show ta, tb, tc, td, te, tf
+  ts = (ta, tb, tc, td, te, tf)
+  sts = sum(ts)
+  H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return b[1:n]
 end
 
