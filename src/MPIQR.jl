@@ -7,7 +7,7 @@ using Octavian
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
 
-struct MPIMatrix{T} <: AbstractMatrix{T}
+struct MPIQRMatrix{T} <: AbstractMatrix{T}
   localmatrix::Matrix{T}
   globalsize::Tuple{Int64, Int64}
   localcolumns::Vector{Int}
@@ -21,7 +21,7 @@ end
 function localcolumns(rnk, n, blocksize, commsize)
   return vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
 end
-function MPIMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = MPI.COMM_WORLD)
+function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = MPI.COMM_WORLD)
   @assert blocksize >= 1
   rnk = MPI.Comm_rank(comm)
   commsize = MPI.Comm_size(comm)
@@ -41,18 +41,18 @@ function MPIMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = 
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
   @assert minimum(columnlookup) >= 0
   @assert maximum(columnlookup) <= n
-  return MPIMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, rnk, comm, commsize)
+  return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, rnk, comm, commsize)
 end
-columnowner(A::MPIMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
+columnowner(A::MPIQRMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
 
-Base.size(A::MPIMatrix) = A.globalsize
-localsize(A::MPIMatrix, dim=nothing) = size(A.localmatrix, dim)
-Base.getindex(A::MPIMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
-localcolindex(A::MPIMatrix, j) = A.columnlookup[j]
-function Base.setindex!(A::MPIMatrix, v::Number, i, j)
+Base.size(A::MPIQRMatrix) = A.globalsize
+localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
+Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
+localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
+function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
-localcolsize(A::MPIMatrix, j) = length(localcolindex(A, j))
+localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
 
 #function hotloop!(H, Hj, y, j, ja, jz, m, n)
 #  ja > n && return nothing
@@ -63,7 +63,7 @@ localcolsize(A::MPIMatrix, j) = length(localcolindex(A, j))
 #  end
 #  return nothing
 #end
-function hotloop!(H::MPIMatrix{T}, Hj, y, j, ja, jz, m, n) where T
+function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where T
   jz > n && return nothing
   js = intersect(H.localcolumns, ja:jz)
   isempty(js) && return nothing

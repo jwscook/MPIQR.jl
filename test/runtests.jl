@@ -41,7 +41,7 @@ for blocksize in (1, 4), npow in 7:1:10, T in (ComplexF64, )#Float64,
   localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
   b = deepcopy(ball)
 
-  A = MPIQR.MPIMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
+  A = MPIQR.MPIQRMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
 
   t2 = @elapsed  begin
     H, α = MPIQR.householder!(A)
