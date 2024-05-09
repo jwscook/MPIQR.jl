@@ -114,21 +114,21 @@ function householder!(H::AbstractMatrix{T}) where T
     t4 += @elapsed if j + 1 <= n
       resize!(tmp, m - j)
       src = columnowner(H, j + 1)
-      req = if H.rank == src
+      reqs = Vector{MPI.Request}()
+      if H.rank == src
         tmp .= view(H, j+1:m, j + 1)
         for r in filter(!=(src), 0:H.commsize-1)
-          MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r)
+          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
         end
-        MPI.Request()
       else
-        MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank)
+        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank))
       end
     end
 
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 2, n, m, n)
 
     t5 += @elapsed if j + 1 <= n
-      MPI.Wait(req)
+      MPI.Waitall(reqs)
       @views Hj[j+1:m] .= tmp
     end
   end
