@@ -2,6 +2,7 @@ using MPIQR
 
 using LinearAlgebra, Random, Base.Threads
 using MPI, Distributed, MPIClusterManagers
+using ArbNumerics
 
 MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const cmm = MPI.COMM_WORLD
@@ -20,15 +21,16 @@ end
 using Random
 Random.seed!(0)
 
-for blocksize in (1, 4), npow in 7:1:10, T in (ComplexF64, )#Float64, 
-  n = 2^npow
+for blocksize in (1, 3), npow in 7:1:12, T in (ComplexF64, ArbComplex)#Float64, 
+  n = (2^npow ÷ blocksize) * blocksize
   m = n + 2^(npow-2)
   iszero(rnk) && @show T, m, n, blocksize
   A0 = zeros(T, 0, 0)
   x1 = b0 = zeros(T, 0)
   if rnk == 0
-    A0 = rand(T, m, n)
-    b0 = rand(T, m)
+    T1 = T <: Complex ? ComplexF64 : Float64
+    A0 = T.(rand(T1, m, n))
+    b0 = T.(rand(T1, m))
     A1 = deepcopy(A0)
     b1 = deepcopy(b0)
     t1 = @elapsed x1 = qr!(A1, NoPivot()) \ b1
