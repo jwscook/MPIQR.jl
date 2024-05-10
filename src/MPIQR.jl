@@ -90,7 +90,13 @@ function householder!(H::AbstractMatrix{T}) where T
   if H.rank == src
     @views Hj[j:m] .= H[j:m, j]
   end
-  MPI.Bcast!(Hj, H.comm; root=src)
+  buff = MPI.Buffer(MPI.serialize(Hj[j:m]))
+
+  req = MPI.Request()
+  status = MPI.API.MPI_Ibcast(buff.data, buff.count, buff.datatype, src, H.comm, req)
+  MPI.Wait(req)
+  Hj .= MPI.deserialize(buff.data)
+#  MPI.Bcast!(Hj, H.comm; root=src)
 
   tmp = zeros(T, m)
   @inbounds @views for j in 1:n
@@ -109,24 +115,41 @@ function householder!(H::AbstractMatrix{T}) where T
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
 
     t4 += @elapsed if j + 1 <= n
-      resize!(tmp, m - j)
+      #resize!(tmp, m - j)
       src = columnowner(H, j + 1)
-      reqs = Vector{MPI.Request}()
-      if H.rank == src
-        tmp .= view(H, j+1:m, j + 1)
-        for r in filter(!=(src), 0:H.commsize-1)
-          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
-        end
+      buff = if H.rank == src
+        MPI.Buffer(MPI.serialize(H[j+1:m, j+1]))
       else
-        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank))
+        MPI.Buffer(Vector{UInt8}(undef, 0))
       end
+      bufflen = MPI.Bcast(sizeof(buff.data), src, H.comm)
+      buff = if H.rank != src
+        MPI.Buffer(Vector{UInt8}(undef, bufflen))#MPI.serialize(Hj[j+1:m])) # make buff the right size
+      else
+        buff
+      end
+
+    req = MPI.Request()
+    status = MPI.API.MPI_Ibcast(buff.data, buff.count, buff.datatype, src, H.comm, req)
+
+      #reqs = Vector{MPI.Request}()
+      #if H.rank == src
+      #  tmp .= view(H, j+1:m, j + 1)
+      #  for r in filter(!=(src), 0:H.commsize-1)
+      #    push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
+      #  end
+      #else
+      #  push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank))
+      #end
     end
 
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 2, n, m, n)
 
-    t5 += @elapsed if j + 1 <= n
-      MPI.Waitall(reqs)
-      @views Hj[j+1:m] .= tmp
+    if j + 1 <= n
+      MPI.Wait(req)
+      t5 += @elapsed Hj[j+1:m].= MPI.deserialize(buff.data)
+    #  MPI.Waitall(reqs)
+    #  @views Hj[j+1:m] .= tmp
     end
   end
   ts = (t1, t2, t3, t4, t5)
