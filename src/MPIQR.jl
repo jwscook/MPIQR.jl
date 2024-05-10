@@ -88,7 +88,7 @@ function householder!(H::AbstractMatrix{T}) where T
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @views Hj[j:m] .= H[j:m, j]
+    @inbounds @views copyto!(Hj[j:m], H[j:m, j])
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
@@ -103,7 +103,7 @@ function householder!(H::AbstractMatrix{T}) where T
       Hj[j:m] .*= f
     end
     t2 += @elapsed if H.rank == columnowner(H, j)
-      @views H[j:m, j] .= Hj[j:m]
+      @inbounds @views copyto!(H[j:m, j], Hj[j:m])
     end
 
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
