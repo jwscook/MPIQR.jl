@@ -53,17 +53,18 @@ function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
 localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
-
-#function hotloop!(H, Hj, y, j, ja, jz, m, n)
-#  ja > n && return nothing
-#  iters = intersect(H.localcolumns, ja:jz)
-#  @inbounds @views @threads :dynamic for jj in iters
-#    s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-#    H[j:m, jj] .-= Hj[j:m] * s
-#  end
-#  return nothing
-#end
-function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where T
+const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
+  Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
+function hotloop!(H, Hj, y, j, ja, jz, m, n)
+  ja > n && return nothing
+  iters = intersect(H.localcolumns, ja:jz)
+  @inbounds @views @threads :dynamic for jj in iters
+    s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
+    H[j:m, jj] .-= Hj[j:m] * s
+  end
+  return nothing
+end
+function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where {T<:IsBitsUnion}
   jz > n && return nothing
   js = intersect(H.localcolumns, ja:jz)
   isempty(js) && return nothing
@@ -72,12 +73,8 @@ function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where T
   ljs = lja:ljz
   ll = length(ljs)
   mul!(view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz)', view(Hj, j:m))
-  if T <: Union{Float32, Float64, ComplexF32, ComplexF64}
-    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-    BLAS.ger!(-one(T), view(Hj, j:m), view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz))
-  else
-    matmul!(view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(y, 1:ll)', -1, 1)
-  end
+  # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+  BLAS.ger!(-one(T), view(Hj, j:m), view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz))
   return nothing
 end
 
