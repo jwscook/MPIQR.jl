@@ -61,7 +61,7 @@ blocksize(A::MPIQRMatrix) = A.blocksize
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
 
-function hotloop!(H, Hj, y, j, ja, jz, m, n)
+function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
   ja > n && return nothing
   iters = intersect(H.localcolumns, ja:jz)
   @inbounds @views @threads :dynamic for jj in iters
@@ -70,7 +70,7 @@ function hotloop!(H, Hj, y, j, ja, jz, m, n)
   end
   return nothing
 end
-function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where {T<:IsBitsUnion}
+function hotloop!(H::MPIQRMatrix{T}, Hj::AbstractVector, y, j, ja, jz, m, n) where {T<:IsBitsUnion}
   jz > n && return nothing
   js = intersect(H.localcolumns, ja:jz)
   isempty(js) && return nothing
@@ -83,36 +83,43 @@ function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where {T<:IsBitsUni
   BLAS.ger!(-one(T), view(Hj, j:m), view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz))
   return nothing
 end
+function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
+  for Δk in 0:size(Hj, 2)-1
+    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja + Δk, jz, m, n)
+  end
+end
 
 function householder!(H::AbstractMatrix{T}) where T
   m, n = size(H)
   α = zeros(T, min(m, n)) # Diagonal of R
-  Hj = zeros(T, m, 1) # one column so that it works with Octavian
+  bs = blocksize(H)
+  Hj = zeros(T, m, bs) # one column so that it works with Octavian
   t1 = t2 = t3 = t4 = t5 = 0.0
   y = zeros(eltype(H), localcolsize(H, 3:n))
 
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @inbounds @views copyto!(Hj[j:m], H[j:m, j])
+    @inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j + bs - 1])
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
   tmp = zeros(T, m)
-  @inbounds @views for j in 1:n
-
+  @inbounds @views for j in 1:bs:n
+    for Δj in 0:bs-1
     t1 += @elapsed @views begin
-      s = norm(Hj[j:m])
-      α[j] = s * alphafactor(Hj[j])
-      f = 1 / sqrt(s * (s + abs(Hj[j])))
-      Hj[j] -= α[j]
-      Hj[j:m] .*= f
+      s = norm(Hj[j + Δj:m, 1 + Δj])
+      α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
+      f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
+      Hj[j + Δj, 1 + Δj] -= α[j + Δj]
+      Hj[j + Δj:m, 1 + Δj] .*= f
     end
     t2 += @elapsed if H.rank == columnowner(H, j)
       @inbounds @views copyto!(H[j:m, j], Hj[j:m])
     end
 
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
+    end
 
     t4 += @elapsed if j + 1 <= n
       resize!(tmp, m - j)
