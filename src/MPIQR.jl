@@ -13,6 +13,7 @@ struct MPIQRMatrix{T} <: AbstractMatrix{T}
   localcolumns::Vector{Int}
   columnlookup::Vector{Int}
   colsets::Vector{Set{Int}}
+  blocksize::Int
   rank::Int64
   comm::MPI.Comm
   commsize::Int64
@@ -41,20 +42,25 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
   @assert minimum(columnlookup) >= 0
   @assert maximum(columnlookup) <= n
-  return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, rnk, comm, commsize)
+  return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, blocksize, rnk, comm, commsize)
 end
 columnowner(A::MPIQRMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
 
 Base.size(A::MPIQRMatrix) = A.globalsize
-localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
-localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
+
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
+
+localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
+localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
 localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
+blocksize(A::MPIQRMatrix) = A.blocksize
+
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
+
 function hotloop!(H, Hj, y, j, ja, jz, m, n)
   ja > n && return nothing
   iters = intersect(H.localcolumns, ja:jz)
