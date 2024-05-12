@@ -85,7 +85,7 @@ function hotloop!(H::MPIQRMatrix{T}, Hj::AbstractVector, y, j, ja, jz, m, n) whe
 end
 function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
   for Δk in 0:size(Hj, 2)-1
-    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja + Δk, jz, m, n)
+    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja, jz, m, n)
   end
 end
 
@@ -106,27 +106,32 @@ function householder!(H::AbstractMatrix{T}) where T
 
   tmp = zeros(T, m)
   @inbounds @views for j in 1:bs:n
+    colowner = columnowner(H, j)
     for Δj in 0:bs-1
-    t1 += @elapsed @views begin
-      s = norm(Hj[j + Δj:m, 1 + Δj])
-      α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
-      f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
-      Hj[j + Δj, 1 + Δj] -= α[j + Δj]
-      Hj[j + Δj:m, 1 + Δj] .*= f
+      t1 += @elapsed @views begin
+        s = norm(Hj[j + Δj:m, 1 + Δj])
+        α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
+        f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
+        Hj[j + Δj, 1 + Δj] -= α[j + Δj]
+        Hj[j + Δj:m, 1 + Δj] .*= f
+      end
+      t2 += @elapsed if H.rank == colowner
+        @views copyto!(H[j + Δj:m, j + Δj], Hj[j + Δj:m, 1 + Δj])
+      end
+      #if Δj <= bs-1
+        t3 += @elapsed hotloop!(H, Hj, y, j + Δj, j + 1 + Δj, j - 1 + 2bs, m, n)
+      #end
     end
-    t2 += @elapsed if H.rank == columnowner(H, j)
-      @inbounds @views copyto!(H[j:m, j], Hj[j:m])
-    end
+#    t3 += @elapsed hotloop!(H, Hj, y, j, j, j + 2bs - 1, m, n)
 
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
-    end
-
-    t4 += @elapsed if j + 1 <= n
-      resize!(tmp, m - j)
-      src = columnowner(H, j + 1)
+    t4 += @elapsed if j + bs <= n
+      resize!(tmp, (m - (j - 1 + bs)) * bs)
+      src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
       if H.rank == src
-        tmp .= view(H, j+1:m, j + 1)
+        for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
+          tmp[ci, cj] = H[ii, jj]
+        end
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
         end
@@ -135,11 +140,13 @@ function householder!(H::AbstractMatrix{T}) where T
       end
     end
 
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2, n, m, n)
+    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2bs, n, m, n)
 
-    t5 += @elapsed if j + 1 <= n
+    t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
-      @views Hj[j+1:m] .= tmp
+      for (cj, jj) in enumerate(j + bs:j + 2bs - 1), (ci, ii) in enumerate(j+bs:m)
+        Hj[ii, cj] = tmp[ci, cj]
+      end
     end
   end
   ts = (t1, t2, t3, t4, t5)
