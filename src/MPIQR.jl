@@ -100,12 +100,18 @@ function householder!(H::AbstractMatrix{T}) where T
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j + bs - 1])
+    @inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
-  tmp = zeros(T, m)
+  tmp = zeros(T, m * bs)
   @inbounds @views for j in 1:bs:n
+
+    sleep(H.rank * 0.1)
+    for i in eachindex(Hj)
+        @show j, H.rank, i, Hj[i]
+    end
+
     colowner = columnowner(H, j)
     for Δj in 0:bs-1
       t1 += @elapsed @views begin
@@ -118,34 +124,41 @@ function householder!(H::AbstractMatrix{T}) where T
       t2 += @elapsed if H.rank == colowner
         @views copyto!(H[j + Δj:m, j + Δj], Hj[j + Δj:m, 1 + Δj])
       end
-      #if Δj <= bs-1
-        t3 += @elapsed hotloop!(H, Hj, y, j + Δj, j + 1 + Δj, j - 1 + 2bs, m, n)
-      #end
+      t3 += @elapsed hotloop!(H, Hj, y, j + Δj, j + 1 + Δj, j - 1 + 2bs, m, n)
     end
-#    t3 += @elapsed hotloop!(H, Hj, y, j, j, j + 2bs - 1, m, n)
+    @show "A", H.rank, size(tmp)
 
     t4 += @elapsed if j + bs <= n
       resize!(tmp, (m - (j - 1 + bs)) * bs)
+    @show "B", H.rank, size(tmp)
       src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
       if H.rank == src
         for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
           tmp[ci, cj] = H[ii, jj]
+          t = tmp[ci, cj]
+          @show j, src, ci, cj, t
         end
         for r in filter(!=(src), 0:H.commsize-1)
-          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
+          @show src, size(tmp), (j + bs) + n * r
+          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + bs) + n * r))
         end
       else
-        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank))
+        @show H.rank, size(tmp),(j + bs) + n * H.rank
+        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + bs) + n * H.rank))
       end
     end
 
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 2bs, n, m, n)
 
+    @show "C", H.rank, size(tmp)
     t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
-      for (cj, jj) in enumerate(j + bs:j + 2bs - 1), (ci, ii) in enumerate(j+bs:m)
+      sleep(H.rank * 0.1)
+      for cj in 1:bs, (ci, ii) in enumerate(j+bs:m)
         Hj[ii, cj] = tmp[ci, cj]
+        t = tmp[ci, cj]#Hj[ii, cj]
+        @show j, H.rank, cj, ii, t
       end
     end
   end
