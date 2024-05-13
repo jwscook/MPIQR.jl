@@ -78,9 +78,8 @@ function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where {T<:IsBitsUni
   return nothing
 end
 
-function householder!(H::AbstractMatrix{T}) where T
+function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2))) where T
   m, n = size(H)
-  α = zeros(T, min(m, n)) # Diagonal of R
   Hj = zeros(T, m, 1) # one column so that it works with Octavian
   t1 = t2 = t3 = t4 = t5 = 0.0
   y = zeros(eltype(H), localcolsize(H, 3:n))
@@ -132,7 +131,7 @@ function householder!(H::AbstractMatrix{T}) where T
   ts = (t1, t2, t3, t4, t5)
   sts = sum(ts)
   H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
-  return (H, α)
+  return MPIQRStruct(H, α)
 end
 
 
@@ -262,6 +261,21 @@ function solve_householder!(b, H, α)
   H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return b[1:n]
 end
+
+struct MPIQRStruct{T1, T2}
+  A::T1
+  α::T2
+end
+
+MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
+
+function LinearAlgebra.qr!(A::MPIQRMatrix)
+  H = MPIQRStruct(A)
+  householder!(H.A, H.α)
+  return H
+end
+
+LinearAlgebra.:(\)(H::MPIQRStruct, b) = solve_householder!(b, H.A, H.α)
 
 end
 
