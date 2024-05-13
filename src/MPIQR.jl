@@ -71,8 +71,7 @@ end
 function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
   isempty(y) && return nothing
   mul!(y, H', Hj)
-  # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-  BLAS.ger!(-one(T), Hj, y, H)
+  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
   return nothing
 end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
@@ -145,7 +144,7 @@ function householder!(H::MPIQRMatrix{T}, α = zeros(T, size(H, 2)), verbose=fals
       if H.rank == src
         k = 0
         for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
-          tmp[k+=1] = H[ii, jj]
+          @inbounds tmp[k+=1] = H[ii, jj]
         end
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + bs) + n * r))
@@ -161,7 +160,7 @@ function householder!(H::MPIQRMatrix{T}, α = zeros(T, size(H, 2)), verbose=fals
       MPI.Waitall(reqs)
       k = 0
       for cj in 1:bs, (ci, ii) in enumerate(j+bs:m)
-        Hj[ii, cj] = tmp[k+=1]
+        @inbounds Hj[ii, cj] = tmp[k+=1]
       end
     end
   end
