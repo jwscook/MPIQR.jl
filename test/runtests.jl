@@ -17,8 +17,8 @@ using Random
   using ThreadPinning
 end
 
-function run()
-  for blocksize in (1, 2, 3, 4), npow in 8:2:12, T in (ComplexF64, )#Float64,
+function run(blocksizes=(1,2,4), npows=(6:2:12), Ts=(ComplexF64,); bestof=2)
+  for blocksize in blocksizes, npow in npows, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
       ThreadPinning.pinthreads(cpus)
@@ -37,7 +37,7 @@ function run()
       b1 = deepcopy(b0)
       x1 = qr!(A1, NoPivot()) \ b1
       t1s = []
-      for _ in 1:3
+      for _ in 1:bestof
         push!(t1s, @elapsed qr!(A1, NoPivot()) \ b1)
       end
       t1 = minimum(t1s)
@@ -58,7 +58,7 @@ function run()
     x2 = MPIQR.solve_householder!(b, H, α)
 
     t2s = []
-    for _ in 1:3
+    for _ in 1:bestof
       push!(t2s, @elapsed begin
         H, α = MPIQR.householder!(A)
         MPIQR.solve_householder!(b, H, α)
@@ -72,7 +72,7 @@ function run()
         @assert norm(Aall' * Aall * x1 .- Aall' * ball) < 1e-8
         res = norm(Aall' * Aall * x2 .- Aall' * ball)
         try
-          println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize took $(t2/t1)x")
+          println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize: time=$(t2/t1)x")
           @assert res < 1e-8
           println("    PASSED: norm of residual = $res")
         catch
