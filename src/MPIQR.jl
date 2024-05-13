@@ -98,9 +98,10 @@ function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
   end
 end
 
-function householder!(H::AbstractMatrix{T}, verbose=false) where T
+function householder!(H::MPIQRMatrix{T}, α = zeros(T, size(H, 2)), verbose=false
+    ) where T
   m, n = size(H)
-  α = zeros(T, min(m, n)) # Diagonal of R
+  @assert m > n
   bs = blocksize(H)
   Hj = zeros(T, m, bs)
   Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj
@@ -166,7 +167,7 @@ function householder!(H::AbstractMatrix{T}, verbose=false) where T
   end
   ts = (t1, t2, t3, t4, t5)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
-  return (H, α)
+  return MPIQRStruct(H, α)
 end
 
 
@@ -200,6 +201,21 @@ function solve_householder!(b, H, α, verbose=false)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return b[1:n]
 end
+
+struct MPIQRStruct{T1, T2}
+  A::T1
+  α::T2
+end
+
+MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
+
+function LinearAlgebra.qr!(A::MPIQRMatrix)
+  H = MPIQRStruct(A)
+  householder!(H.A, H.α)
+  return H
+end
+
+LinearAlgebra.:(\)(H::MPIQRStruct, b) = solve_householder!(b, H.A, H.α)
 
 end
 

@@ -17,7 +17,7 @@ using Random
   using ThreadPinning
 end
 
-function run(blocksizes=(1,2,4), npows=(6:2:12), Ts=(ComplexF64,); bestof=2)
+function run(blocksizes=(1,2,4), npows=(5:2:11), Ts=(ComplexF64,); bestof=2)
   for blocksize in blocksizes, npow in npows, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
@@ -54,14 +54,12 @@ function run(blocksizes=(1,2,4), npows=(6:2:12), Ts=(ComplexF64,); bestof=2)
     A = MPIQR.MPIQRMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
 
     MPI.Barrier(cmm)
-    H, α = MPIQR.householder!(A)
-    x2 = MPIQR.solve_householder!(b, H, α)
+    x2 = qr!(A) \ b
 
     t2s = []
     for _ in 1:bestof
       push!(t2s, @elapsed begin
-        H, α = MPIQR.householder!(A)
-        MPIQR.solve_householder!(b, H, α)
+        qr!(A) \ b
       end)
     end
     t2 = minimum(t2s)
