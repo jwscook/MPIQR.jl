@@ -13,6 +13,7 @@ struct MPIQRMatrix{T} <: AbstractMatrix{T}
   localcolumns::Vector{Int}
   columnlookup::Vector{Int}
   colsets::Vector{Set{Int}}
+  blocksize::Int
   rank::Int64
   comm::MPI.Comm
   commsize::Int64
@@ -41,196 +42,135 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
   @assert minimum(columnlookup) >= 0
   @assert maximum(columnlookup) <= n
-  return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, rnk, comm, commsize)
+  return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, blocksize, rnk, comm, commsize)
 end
 columnowner(A::MPIQRMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
 
 Base.size(A::MPIQRMatrix) = A.globalsize
-localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
-localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
+
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
+
+localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
+localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
 localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
+blocksize(A::MPIQRMatrix) = A.blocksize
+
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
-function hotloop!(H, Hj, y, j, ja, jz, m, n)
-  ja > n && return nothing
-  iters = intersect(H.localcolumns, ja:jz)
-  @inbounds @views @threads :dynamic for jj in iters
-    s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-    H[j:m, jj] .-= Hj[j:m] * s
+
+function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
+  @inbounds @views @threads :dynamic for jj in 1:size(H, 2)
+    s = sum(i->conj(Hj[i]) * H[i, jj], eachindex(Hj))
+    H[:, jj] .-= Hj * s
   end
   return nothing
 end
-function hotloop!(H::MPIQRMatrix{T}, Hj, y, j, ja, jz, m, n) where {T<:IsBitsUnion}
-  jz > n && return nothing
-  js = intersect(H.localcolumns, ja:jz)
-  isempty(js) && return nothing
+function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
+  isempty(y) && return nothing
+  mul!(y, H', Hj)
+  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+  return nothing
+end
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
+    js = intersect(H.localcolumns, ja:jz))
   lja = localcolindex(H, js[1])
   ljz = localcolindex(H, js[end])
-  ljs = lja:ljz
-  ll = length(ljs)
-  mul!(view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz)', view(Hj, j:m))
-  # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-  BLAS.ger!(-one(T), view(Hj, j:m), view(y, 1:ll), view(H.localmatrix, j:m, lja:ljz))
+  ll = length(lja:ljz)
+  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m), view(y, 1:ll))
+end
+
+function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
+  js = intersect(H.localcolumns, ja:jz)
+  isempty(js) && return nothing
+  viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
+  hotloop!(viewH, viewHj, viewy)
   return nothing
 end
 
-function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2))) where T
+function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
+  bs = blocksize(H)
+  for Δk in 0:size(Hj, 2)-1
+    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja, jz, m, n)
+  end
+end
+
+function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
+    ) where T
   m, n = size(H)
-  Hj = zeros(T, m, 1) # one column so that it works with Octavian
+  @assert m > n
+  bs = blocksize(H)
+  Hj = zeros(T, m, bs)
+  Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj
   t1 = t2 = t3 = t4 = t5 = 0.0
   y = zeros(eltype(H), localcolsize(H, 3:n))
 
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @inbounds @views copyto!(Hj[j:m], H[j:m, j])
+    @inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
-  tmp = zeros(T, m)
-  @inbounds @views for j in 1:n
+  tmp = zeros(T, m * bs)
+  @inbounds @views for j in 1:bs:n
+    colowner = columnowner(H, j)
 
-    t1 += @elapsed @views begin
-      s = norm(Hj[j:m])
-      α[j] = s * alphafactor(Hj[j])
-      f = 1 / sqrt(s * (s + abs(Hj[j])))
-      Hj[j] -= α[j]
-      Hj[j:m] .*= f
-    end
-    t2 += @elapsed if H.rank == columnowner(H, j)
-      @inbounds @views copyto!(H[j:m, j], Hj[j:m])
-    end
+    @inbounds for Δj in 0:bs-1
+      t1 += @elapsed @views begin
+        s = norm(Hj[j + Δj:m, 1 + Δj])
+        α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
+        f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
+        Hj[j + Δj, 1 + Δj] -= α[j + Δj]
+        Hj[j + Δj:m, 1 + Δj] .*= f
+      end
 
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + 1, j + 1, m, n)
-
-    t4 += @elapsed if j + 1 <= n
-      resize!(tmp, m - j)
-      src = columnowner(H, j + 1)
-      reqs = Vector{MPI.Request}()
-      if H.rank == src
-        tmp .= view(H, j+1:m, j + 1)
-        for r in filter(!=(src), 0:H.commsize-1)
-          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r))
-        end
-      else
-        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + 1) + n * H.rank))
+      t2 += @elapsed bs > 1 && copyto!(Hjcopy, Hj) # prevent data race
+      t3 += @elapsed hotloop!(view(Hjcopy, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1 + Δj), view(y, 1 + Δj:bs))
+      t2 += @elapsed bs > 1 && copyto!(Hj, Hjcopy) # prevent data race
+      t2 += @elapsed if H.rank == colowner
+        @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
       end
     end
 
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2, n, m, n)
+    t3 += @elapsed hotloop!(H, Hj, y, j, j + bs, j - 1 + 2bs, m, n)
 
-    t5 += @elapsed if j + 1 <= n
+    t4 += @elapsed if j + bs <= n
+      resize!(tmp, (m - (j - 1 + bs)) * bs)
+      src = columnowner(H, j + bs)
+      reqs = Vector{MPI.Request}()
+      if H.rank == src
+        k = 0
+        for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
+          @inbounds tmp[k+=1] = H[ii, jj]
+        end
+        for r in filter(!=(src), 0:H.commsize-1)
+          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + bs) + n * r))
+        end
+      else
+        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + bs) + n * H.rank))
+      end
+    end
+
+    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2bs, n, m, n)
+
+    t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
-      @views Hj[j+1:m] .= tmp
+      k = 0
+      for cj in 1:bs, (ci, ii) in enumerate(j+bs:m)
+        @inbounds Hj[ii, cj] = tmp[k+=1]
+      end
     end
   end
   ts = (t1, t2, t3, t4, t5)
-  sts = sum(ts)
-  H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return MPIQRStruct(H, α)
 end
 
 
-# function householder!(H::AbstractMatrix{T}) where T
-#   m, n = size(H)
-#   α = zeros(T, min(m, n)) # Diagonal of R
-#   Hj = zeros(T, m)
-#   t1 = t2 = t3 = t4 = t5 = 0.0
-#
-#   j = 1
-#   src = columnowner(H, j)
-#   if H.rank == src
-#     Hj[j:m] .= H[j:m, j]
-#     for r in filter(!=(src), 0:H.commsize-1)
-#       MPI.Isend(Hj[j:m], H.comm; dest=r, tag=j + n * r)
-#     end
-#   end
-#
-#   tmp = zeros(T, m)
-#   t5 += @elapsed @inbounds @views for j in 1:n
-#
-#     src = columnowner(H, j)
-#     resize!(tmp, m - j + 1)
-#     t3 += @elapsed if H.rank != src
-#         MPI.Recv!(tmp, H.comm; source=src, tag=j + n * H.rank)
-#         @views Hj[j:m] .= tmp
-#     else
-#       @views Hj[j:m] .= H[j:m, j]
-#     end
-#
-#     t1 += @elapsed @views begin
-#       s = norm(Hj[j:m])
-#       α[j] = s * alphafactor(Hj[j])
-#       f = 1 / sqrt(s * (s + abs(Hj[j])))
-#       Hj[j] -= α[j]
-#       Hj[j:m] .*= f
-#     end
-#     t2 += @elapsed if H.rank == src
-#       @views H[j:m, j] .= Hj[j:m]
-#     end
-#
-#     t3 += @elapsed @views @threads :dynamic for jj in intersect(H.localcolumns, j+1:j+1)
-#       s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-#       @views @simd for i in j:m
-#         H[i, jj] -= Hj[i] * s
-#       end
-#     end
-#     t4 += @elapsed if j + 1 <= n
-#       src = columnowner(H, j + 1)
-#       if H.rank == src
-#         resize!(tmp, m - j)
-#         tmp .= view(H, j+1:m, j + 1)
-#         for r in filter(!=(src), 0:H.commsize-1)
-#           MPI.Isend(tmp, H.comm; dest=r, tag=(j + 1) + n * r)
-#         end
-#       end
-#     end
-#     t4 += @elapsed @views @threads :dynamic for jj in intersect(H.localcolumns, j+2:n)
-#       #s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-#       s = dot(view(Hj, j:m), view(H, j:m, jj))
-#       H[j:m, jj] .-= Hj[j:m] * s
-#     end
-#
-#   end
-#   H.rank == 0 && @show t1, t2, t3, t4, t5
-#
-#   return (H, α)
-# end
-#
-# function householder!(A::AbstractMatrix{T}) where T
-#   m, n = size(A)
-#   H = A
-#   α = zeros(T, min(m, n)) # Diagonal of R
-#   Hj = zeros(T, m)
-#   t1 = t2 = t3 = t4 = t5 = 0.0
-#   t5 += @elapsed @inbounds @views for j in 1:n
-#     jinA = in(j, A.localcolumns)
-#     t1 += @elapsed if jinA
-#       s = norm(H[j:m, j])
-#       α[j] = s * alphafactor(H[j, j])
-#       f = 1 / sqrt(s * (s + abs(H[j, j])))
-#       H[j, j] -= α[j]
-#       H[j:m, j] .*= f
-#     end
-#     t2 += @elapsed jinArnk = columnowner(H, j)
-#
-#     t3 += @elapsed Hj[j:m] .= MPI.bcast(H[j:m, j], jinArnk, A.comm)
-#
-#     t4 += @elapsed @views @threads :dynamic for jj in intersect(A.localcolumns, j+1:n)
-#       s = sum(i->conj(Hj[i]) * H[i, jj], j:m)
-#       H[j:m, jj] .-= Hj[j:m] * s
-#     end
-#   end
-#   t6 = @elapsed α = MPI.Allreduce(α, +, A.comm)
-#   H.rank == 0 && @show t1, t2, t3, t4, t5, t6
-#   return (H, α)
-# end
-
-function solve_householder!(b, H, α)
+function solve_householder!(b, H, α, verbose=false)
   m, n = size(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), length(b))
@@ -257,8 +197,7 @@ function solve_householder!(b, H, α)
     b[i] /= α[i]
   end
   ts = (ta, tb, tc, td, te, tf)
-  sts = sum(ts)
-  H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return b[1:n]
 end
 
