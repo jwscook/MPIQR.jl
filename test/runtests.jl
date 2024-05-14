@@ -13,10 +13,6 @@ BLAS.set_num_threads(nts)
 
 using Random
 
-@static if Sys.islinux()
-  using ThreadPinning
-end
-
 function run(blocksizes=(1,2,4), npows=(10,11,), Ts=(ComplexF64,); bestof=3)
   for blocksize in blocksizes, npow in npows, T in Ts
     @static if Sys.islinux()

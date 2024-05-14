@@ -68,12 +68,12 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
   end
   return nothing
 end
-function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
-  isempty(y) && return nothing
-  mul!(y, H', Hj)
-  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-  return nothing
-end
+#function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
+#  isempty(y) && return nothing
+#  mul!(y, H', Hj)
+#  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+#  return nothing
+#end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
     js = intersect(H.localcolumns, ja:jz))
   lja = localcolindex(H, js[1])
@@ -101,12 +101,14 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
     ) where T
   m, n = size(H)
   @assert m > n
-  bs = blocksize(H)
-  Hj = zeros(T, m, bs)
-  Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj
+  bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
+  Hj = zeros(T, m, bs) # the H column(s)
+  Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
-  y = zeros(eltype(H), localcolsize(H, 3:n))
+  # work array for the BLAS call
+  y = zeros(eltype(H), localcolsize(H, 1:n))
 
+  # send the first column(s) of H to Hj on all ranks
   j = 1
   src = columnowner(H, j)
   if H.rank == src
@@ -118,6 +120,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
 
+    # process all the first bs column(s) of H
     @inbounds for Δj in 0:bs-1
       t1 += @elapsed @views begin
         s = norm(Hj[j + Δj:m, 1 + Δj])
@@ -135,8 +138,10 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
       end
     end
 
+    # now next do the next column to make it ready for the next iteration of the loop
     t3 += @elapsed hotloop!(H, Hj, y, j, j + bs, j - 1 + 2bs, m, n)
 
+    # if it's not the last iteration send the next iterations Hj to all ranks
     t4 += @elapsed if j + bs <= n
       resize!(tmp, (m - (j - 1 + bs)) * bs)
       src = columnowner(H, j + bs)
@@ -154,8 +159,10 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
       end
     end
 
+    # Apply Hj to all the columns of H to the right of this column + 2 blocks
     t3 += @elapsed hotloop!(H, Hj, y, j, j + 2bs, n, m, n)
 
+    # Now receive next iterations Hj
     t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
       k = 0
