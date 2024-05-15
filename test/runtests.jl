@@ -11,7 +11,7 @@ const nts = Threads.nthreads()
 
 BLAS.set_num_threads(nts)
 
-using Random
+using Random, ThreadPinning
 
 function run(blocksizes=(1,2,4), npows=(10,11,), Ts=(ComplexF64,); bestof=3)
   for blocksize in blocksizes, npow in npows, T in Ts
