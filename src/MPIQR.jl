@@ -32,6 +32,7 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   localcols = localcolumns(rnk, n, blocksize, commsize)
   @assert minimum(localcols) >= 1
   @assert maximum(localcols) <= n
+  @assert issorted(localcols)
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
@@ -57,6 +58,31 @@ localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
 localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
 localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
 blocksize(A::MPIQRMatrix) = A.blocksize
+struct ColumnIntersectionIterator
+  localcolumns::Vector{Int}
+  indices::UnitRange{Int}
+end
+function Base.iterate(iter::ColumnIntersectionIterator, state=0)
+  isempty(iter.indices) && return nothing
+  if state >= length(iter.indices)
+    return nothing
+  else
+    state += 1
+    return (iter.localcolumns[iter.indices[state]], state)
+  end
+end
+Base.first(cii::ColumnIntersectionIterator) = cii.localcolumns[first(cii.indices)]
+Base.last(cii::ColumnIntersectionIterator) = cii.localcolumns[last(cii.indices)]
+
+function Base.intersect(A::MPIQRMatrix, cols)
+  indexa = searchsortedfirst(A.localcolumns, first(cols))
+  indexz = searchsortedlast(A.localcolumns, last(cols))
+  indexa = indexa > length(A.localcolumns) ? length(A.localcolumns) + 1 : indexa
+  indexz = indexz > length(A.localcolumns) ? 0 : indexz
+  indices = indexa:indexz
+  output = ColumnIntersectionIterator(A.localcolumns, indices)
+  return output
+end
 
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
@@ -68,22 +94,22 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
   end
   return nothing
 end
-#function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
-#  isempty(y) && return nothing
-#  mul!(y, H', Hj)
-#  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#  return nothing
-#end
+function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
+  isempty(y) && return nothing
+  mul!(y, H', Hj)
+  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+  return nothing
+end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
-    js = intersect(H.localcolumns, ja:jz))
-  lja = localcolindex(H, js[1])
-  ljz = localcolindex(H, js[end])
+    js = intersect(H, ja:jz))
+  lja = localcolindex(H, first(js))
+  ljz = localcolindex(H, last(js))
   ll = length(lja:ljz)
   return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m), view(y, 1:ll))
 end
 
 function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
-  js = intersect(H.localcolumns, ja:jz)
+  js = intersect(H, ja:jz)
   isempty(js) && return nothing
   viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
   hotloop!(viewH, viewHj, viewy)
@@ -112,7 +138,8 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
+    #@inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
+    @inbounds @views Hj[j:m, :] .= H[j:m, j:j - 1 + bs]
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
@@ -130,11 +157,14 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
 
-      t2 += @elapsed bs > 1 && copyto!(Hjcopy, Hj) # prevent data race
+      #t2 += @elapsed bs > 1 && copyto!(Hjcopy, Hj) # prevent data race
+      t2 += @elapsed bs > 1 && (Hjcopy .= Hj) # prevent data race
       t3 += @elapsed hotloop!(view(Hjcopy, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1 + Δj), view(y, 1 + Δj:bs))
-      t2 += @elapsed bs > 1 && copyto!(Hj, Hjcopy) # prevent data race
+      #t2 += @elapsed bs > 1 && copyto!(Hj, Hjcopy) # prevent data race
+      t2 += @elapsed bs > 1 && (Hj .= Hjcopy) # prevent data race
       t2 += @elapsed if H.rank == colowner
-        @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+        #@views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+        @views H[j + Δj:m, j + Δj:j-1+bs] .= Hj[j + Δj:m, 1 + Δj:bs]
       end
     end
 
@@ -196,7 +226,7 @@ function solve_householder!(b, H, α, verbose=false)
   td += @elapsed MPI.Barrier(H.comm)
   @inbounds @views for i in n:-1:1
     bi = zero(eltype(b))
-    te += @elapsed for j in intersect(i+1:n, H.localcolumns)
+    te += @elapsed for j in intersect(H, i+1:n)
       bi += H[i, j] * b[j]
     end
     tf += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
