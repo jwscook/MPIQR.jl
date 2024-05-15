@@ -2,7 +2,6 @@ module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators
 using Distributed, MPI, MPIClusterManagers
-using Octavian
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
@@ -62,7 +61,7 @@ struct ColumnIntersectionIterator
   localcolumns::Vector{Int}
   indices::UnitRange{Int}
 end
-function Base.iterate(iter::ColumnIntersectionIterator, state=0)
+Base.@propagate_inbounds function Base.iterate(iter::ColumnIntersectionIterator, state=0)
   isempty(iter.indices) && return nothing
   if state >= length(iter.indices)
     return nothing
@@ -73,6 +72,7 @@ function Base.iterate(iter::ColumnIntersectionIterator, state=0)
 end
 Base.first(cii::ColumnIntersectionIterator) = cii.localcolumns[first(cii.indices)]
 Base.last(cii::ColumnIntersectionIterator) = cii.localcolumns[last(cii.indices)]
+#Base.length(cii::ColumnIntersectionIterator) = length(cii.indices)
 
 function Base.intersect(A::MPIQRMatrix, cols)
   indexa = searchsortedfirst(A.localcolumns, first(cols))
@@ -82,6 +82,19 @@ function Base.intersect(A::MPIQRMatrix, cols)
   indices = indexa:indexz
   output = ColumnIntersectionIterator(A.localcolumns, indices)
   return output
+end
+
+function threadedcopyto!(a, b)
+  @assert length(a) == length(b)
+  if Threads.nthreads() == 1
+    @inbounds @simd for i in eachindex(a, b)
+      a[i] = b[i]
+    end
+  else
+    @inbounds @threads :static for i in eachindex(a, b)
+      a[i] = b[i]
+    end
+  end
 end
 
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
@@ -129,7 +142,8 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
   @assert m > n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = zeros(T, m, bs) # the H column(s)
-  Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj # copy of the H column(s)
+  #Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj # copy of the H column(s)
+  Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
   y = zeros(eltype(H), localcolsize(H, 1:n))
@@ -139,7 +153,8 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
   src = columnowner(H, j)
   if H.rank == src
     #@inbounds @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
-    @inbounds @views Hj[j:m, :] .= H[j:m, j:j - 1 + bs]
+    #@inbounds @views Hj[j:m, :] .= H[j:m, j:j - 1 + bs]
+    @views threadedcopyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
   end
   MPI.Bcast!(Hj, H.comm; root=src)
 
@@ -157,14 +172,22 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
 
-      #t2 += @elapsed bs > 1 && copyto!(Hjcopy, Hj) # prevent data race
-      t2 += @elapsed bs > 1 && (Hjcopy .= Hj) # prevent data race
-      t3 += @elapsed hotloop!(view(Hjcopy, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1 + Δj), view(y, 1 + Δj:bs))
-      #t2 += @elapsed bs > 1 && copyto!(Hj, Hjcopy) # prevent data race
-      t2 += @elapsed bs > 1 && (Hj .= Hjcopy) # prevent data race
+#      #t2 += @elapsed bs > 1 && copyto!(Hjcopy, Hj) # prevent data race
+#      #t2 += @elapsed bs > 1 && (Hjcopy .= Hj) # prevent data race
+#      t2 += @elapsed bs > 1 && threadedcopyto!(Hjcopy, Hj) # prevent data race
+#      t3 += @elapsed hotloop!(view(Hjcopy, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1 + Δj), view(y, 1 + Δj:bs))
+#      #t2 += @elapsed bs > 1 && copyto!(Hj, Hjcopy) # prevent data race
+#      #t2 += @elapsed bs > 1 && (Hj .= Hjcopy) # prevent data race
+#      t2 += @elapsed bs > 1 && threadedcopyto!(Hj, Hjcopy) # prevent data race
+
+
+      t2 += @elapsed bs > 1 && threadedcopyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
+      t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(y, 1 + Δj:bs))
+
       t2 += @elapsed if H.rank == colowner
         #@views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
-        @views H[j + Δj:m, j + Δj:j-1+bs] .= Hj[j + Δj:m, 1 + Δj:bs]
+        #@views H[j + Δj:m, j + Δj:j-1+bs] .= Hj[j + Δj:m, 1 + Δj:bs]
+        @views threadedcopyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
       end
     end
 
@@ -195,10 +218,13 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
     # Now receive next iterations Hj
     t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
-      k = 0
-      for cj in 1:bs, (ci, ii) in enumerate(j+bs:m)
-        @inbounds Hj[ii, cj] = tmp[k+=1]
-      end
+#      k = 0
+#      for cj in 1:bs, (ci, ii) in enumerate(j+bs:m)
+#        @inbounds Hj[ii, cj] = tmp[k+=1]
+#      end
+     viewHj = view(Hj, j+bs:m, 1:bs)
+     linearviewHj = reshape(viewHj, length(tmp))
+     threadedcopyto!(linearviewHj, tmp)
     end
   end
   ts = (t1, t2, t3, t4, t5)
@@ -216,17 +242,24 @@ function solve_householder!(b, H, α, verbose=false)
     if in(j, H.localcolumns)
       ta += @elapsed s = dot(H[j:m, j], b[j:m])
       tb += @elapsed b1[j:m] .= H[j:m, j] .* s
+    else
+      b1[j:m] .= 0
     end
-    tc += @elapsed b1 .= MPI.Allreduce(b1, +, H.comm)
+    tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
     b[j:m] .-= b1[j:m]
-    b1[j:m] .= 0
+    b1[j] = 0
   end
   # now that b holds the value of Q'b
   # we may back sub with R
   td += @elapsed MPI.Barrier(H.comm)
   @inbounds @views for i in n:-1:1
+#    bis = zeros(eltype(b), Threads.nthreads())
+#    te += @elapsed @threads for j in collect(intersect(H, i+1:n))
+#      bis[Threads.threadid()] += H[i, j] * b[j]
+#    end
+#    bi = sum(bis)
     bi = zero(eltype(b))
-    te += @elapsed for j in intersect(H, i+1:n)
+    te += @elapsed @inbounds for j in intersect(H, i+1:n)
       bi += H[i, j] * b[j]
     end
     tf += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
