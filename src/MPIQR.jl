@@ -68,12 +68,12 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
   end
   return nothing
 end
-#function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
-#  isempty(y) && return nothing
-#  mul!(y, H', Hj)
-#  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#  return nothing
-#end
+function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
+  isempty(y) && return nothing
+  mul!(y, H', Hj)
+  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+  return nothing
+end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
     js = intersect(H.localcolumns, ja:jz))
   lja = localcolindex(H, js[1])
