@@ -110,12 +110,14 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
 end
 function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
   isempty(y) && return nothing
-  mul!(y, H', Hj)
-  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#  for j in Base.Iterators.partition(1:size(H, 2), min(4, size(H, 2)))
-#    mul!(view(y, j), view(H, :, j)', Hj)
-#    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j)) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#  end
+#  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
+#  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+  ntile = max(1, ceil(Int, 2^12 ÷ size(H, 2)))
+  for j in Base.Iterators.partition(1:size(H, 2), min(ntile, size(H, 2)))
+    mul!(view(y, j), view(H, :, j)', Hj)
+    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
+  end
   return nothing
 end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
