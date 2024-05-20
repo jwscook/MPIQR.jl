@@ -1,7 +1,9 @@
 module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators
-using Distributed, MPI, MPIClusterManagers
+using Distributed, MPI, MPIClusterManagers, Hwloc
+
+const L2CACHESIZEBYTES = Hwloc.cachesize().L2
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
@@ -108,12 +110,13 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
   end
   return nothing
 end
+
 function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
   isempty(y) && return nothing
 #  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
 #  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-  ntile = max(1, ceil(Int, 2^12 ÷ size(H, 2)))
-  for j in Base.Iterators.partition(1:size(H, 2), min(ntile, size(H, 2)))
+  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
+  for j in Base.Iterators.partition(1:size(H, 2), ntile)
     mul!(view(y, j), view(H, :, j)', Hj)
     # ger!(alpha, x, y, A) A = alpha*x*y' + A.
     BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
