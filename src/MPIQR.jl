@@ -23,7 +23,7 @@ end
 function localcolumns(rnk, n, blocksize, commsize)
   return vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
 end
-localcolumns(A::MPIQRMatrix) = A.localcolindex
+localcolumns(A::MPIQRMatrix) = A.localcolumns
 
 function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = MPI.COMM_WORLD)
   @assert blocksize >= 1
