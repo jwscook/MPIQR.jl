@@ -23,6 +23,8 @@ end
 function localcolumns(rnk, n, blocksize, commsize)
   return vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
 end
+localcolumns(A::MPIQRMatrix) = A.localcolindex
+
 function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = MPI.COMM_WORLD)
   @assert blocksize >= 1
   rnk = MPI.Comm_rank(comm)
@@ -53,6 +55,10 @@ Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
+end
+function Base.:*(A::MPIQRMatrix{T}, x::AbstractVector{U}) where {T,U}
+  y = A.localmatrix * x[A.localcolumns]
+  return MPI.Allreduce(y, +, A.comm)
 end
 
 localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)

@@ -32,6 +32,7 @@ function run(blocksizes=(1,3), npows=(10,11), Ts=(ComplexF64,); bestof=3)
       A1 = deepcopy(A0)
       b1 = deepcopy(b0)
       x1 = qr!(A1, NoPivot()) \ b1
+      y1 = A0 * x1
       t1s = []
       for _ in 1:bestof
         push!(t1s, @elapsed qr!(A1, NoPivot()) \ b1)
@@ -44,13 +45,19 @@ function run(blocksizes=(1,3), npows=(10,11), Ts=(ComplexF64,); bestof=3)
     xall = MPI.bcast(x1, 0, cmm)
     x1 = xall
 
+
     localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
     b = deepcopy(ball)
 
     A = MPIQR.MPIQRMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
+    y2 = A * x1
+    if iszero(rnk)
+      @test y2 ≈ y1
+    end
 
     MPI.Barrier(cmm)
     x2 = qr!(A) \ b
+
 
     t2s = []
     for _ in 1:bestof
