@@ -11,13 +11,14 @@ const nts = Threads.nthreads()
 
 BLAS.set_num_threads(nts)
 
-using Random, ThreadPinning
+using Random, ThreadPinning, ProgressMeter
 
-function run(blocksizes=(1,3), npows=(10,11), Ts=(ComplexF64,); bestof=3)
+function run(blocksizes=(1,3), npows=(11,12), Ts=(ComplexF64,); bestof=4)
   for blocksize in blocksizes, npow in npows, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
       ThreadPinning.pinthreads(cpus)
+#      ThreadPinning.pinthreads_mpi(:sockets, rnk, sze)
     end
 
     Random.seed!(0)
@@ -62,7 +63,8 @@ function run(blocksizes=(1,3), npows=(10,11), Ts=(ComplexF64,); bestof=3)
     t2s = []
     for _ in 1:bestof
       push!(t2s, @elapsed begin
-        qr!(A) \ b
+        progress = Progress(size(A, 2) ÷ blocksize, dt=1; showspeed=true)
+        qr!(A; progress=progress) \ b
       end)
     end
     t2 = minimum(t2s)

@@ -2,6 +2,10 @@ module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators
 using Distributed, MPI, MPIClusterManagers, Hwloc
+using ProgressMeter
+
+struct FakeProgress end
+ProgressMeter.next!(::FakeProgress; showvalues=nothing) = nothing
 
 const L2CACHESIZEBYTES = Hwloc.cachesize().L2
 
@@ -152,13 +156,12 @@ function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
   end
 end
 
-function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
-    ) where T
+function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
+    progress=FakeProgress()) where T
   m, n = size(H)
   @assert m > n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = zeros(T, m, bs) # the H column(s)
-  #Hjcopy = bs > 1 ? zeros(T, m, bs) : Hj # copy of the H column(s)
   Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
@@ -225,6 +228,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
       linearviewHj = reshape(viewHj, length(tmp))
       threadedcopyto!(linearviewHj, tmp)
     end
+    iszero(H.rank) && next!(progress)
   end
   ts = (t1, t2, t3, t4, t5)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
@@ -232,7 +236,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)), verbose=false
 end
 
 
-function solve_householder!(b, H, α, verbose=false)
+function solve_householder!(b, H, α; verbose=false)
   m, n = size(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), length(b))
@@ -277,9 +281,9 @@ end
 
 MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
 
-function LinearAlgebra.qr!(A::MPIQRMatrix)
+function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress())
   H = MPIQRStruct(A)
-  householder!(H.A, H.α)
+  householder!(H.A, H.α; progress=progress)
   return H
 end
 
