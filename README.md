@@ -3,7 +3,7 @@
 QR factorise your MPI distributed matrix using Householder reflections and then solve your square or least square problem.
 
 Currently this only works for `Complex32`, `Float64`, `ComplexF32` and `ComplexF64` matrix and vector `eltype`s.
-These `isbitstypes` make use of calls to `BLAS.gemv` and `BLAS.ger!` for highest performance, which is not far off threaded `LAPACK` `getrf` speeds.
+These `isbitstypes` make use of calls to threaded `BLAS.gemv` and `BLAS.ger!` on each rank for highest performance, which is not far off threaded `LAPACK` `getrf` speeds (with a comparable number of cores).
 
 An example:
 
