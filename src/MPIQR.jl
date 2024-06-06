@@ -38,6 +38,7 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   m, n = globalsize
   @assert mod(n, blocksize) == 0
   localcols = localcolumns(rnk, n, blocksize, commsize)
+  @assert length(localcols) > 0
   @assert minimum(localcols) >= 1
   @assert maximum(localcols) <= n
   @assert issorted(localcols)
