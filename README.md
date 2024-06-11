@@ -44,8 +44,8 @@ function run(T=ComplexF64;)
   end
 
   # qr! optionally accepts a progress meter
-  progress = Progress(size(A, 2) ÷ blocksize, dt=1; showspeed=true)
-  x2 = qr!(A; progress=progress) \ b # qr factorize A in-place and solve
+  # qr factorize A in-place and solve
+  x2 = qr!(A; progress=Progress(A; showspeed=true)) \ b
 
   if iszero(rnk) # now see if the answer is right...
     @assert norm(Aall' * Aall * xall .- Aall' * ball) < 1e-8
