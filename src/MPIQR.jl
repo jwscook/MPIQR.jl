@@ -4,9 +4,6 @@ using LinearAlgebra, Base.Threads, Base.Iterators
 using Distributed, MPI, MPIClusterManagers, Hwloc
 using ProgressMeter
 
-struct FakeProgress end
-ProgressMeter.next!(::FakeProgress; showvalues=nothing) = nothing
-
 const L2CACHESIZEBYTES = Hwloc.cachesize().L2
 
 alphafactor(x::Real) = -sign(x)
@@ -71,6 +68,14 @@ localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
 localcolindex(A::MPIQRMatrix, j) = A.columnlookup[j]
 localcolsize(A::MPIQRMatrix, j) = length(localcolindex(A, j))
 blocksize(A::MPIQRMatrix) = A.blocksize
+
+struct FakeProgress end
+ProgressMeter.next!(::FakeProgress; showvalues=nothing) = nothing
+import ProgressMeter.Progress
+function Progress(A::MPIQRMatrix, dt=1; kwargs...)
+  return Progress(size(A, 2) ÷ A.blocksize, dt=dt; kwargs...)
+end
+
 struct ColumnIntersectionIterator
   localcolumns::Vector{Int}
   indices::UnitRange{Int}

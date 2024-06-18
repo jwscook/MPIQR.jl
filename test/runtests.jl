@@ -63,7 +63,7 @@ function run(blocksizes=(1,3), npows=(11,12), Ts=(ComplexF64,); bestof=4)
     t2s = []
     for _ in 1:bestof
       push!(t2s, @elapsed begin
-        progress = Progress(size(A, 2) ÷ blocksize, dt=1; showspeed=true)
+        progress = Progress(A, dt=1; showspeed=true)
         qr!(A; progress=progress) \ b
       end)
     end
