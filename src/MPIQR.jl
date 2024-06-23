@@ -159,19 +159,19 @@ const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
 #  end
 #end
 
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n,
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
   lja = localcolindex(H, first(js))
   ljz = localcolindex(H, last(js))
   ll = length(lja:ljz)
-  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(y, 1:ll, :))
+  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(Hr, j:m, :), view(y, 1:ll, :))
 end
 
-function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
+function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n)
   js = intersect(H, ja:jz)
   isempty(js) && return nothing
-  viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
-  hotloop!(viewH, viewHj, viewy)
+  viewH, viewHj, viewHr, viewy = hotloopviews(H, Hj, Hr, y, j, ja, jz, m, n, js)
+  hotloop!(viewH, viewHj, viewHr, viewy)
   return nothing
 end
 
@@ -184,17 +184,7 @@ function unrecursedcoeffs(N, A)
   return reverse(output)
 end
 
-function hotloop!(H::AbstractMatrix, _Hj::AbstractArray{T}, y) where {T<:IsBitsUnion}
-  Hj = deepcopy(_Hj)
-
-  #Hcopy = deepcopy(H)
-  #@views for k in 1:size(Hj, 2), jj in 1:size(Hcopy, 2)
-  #  s = sum(i->conj(Hj[i, k]) * Hcopy[i, jj], 1:size(Hj, 1))
-  #  Hcopy[:, jj] .-= Hj[:, k] * s
-  #end
-  #H .= Hcopy
-  #return nothing
-
+function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
   dots = Dict{Tuple{Int, Int}, T}()
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[(i, j)] = dot(Hj[:, i], Hj[:, j])
@@ -202,16 +192,23 @@ function hotloop!(H::AbstractMatrix, _Hj::AbstractArray{T}, y) where {T<:IsBitsU
 
   BLAS.gemm!('C', 'N', true, H, Hj, false, y)
 
+  copyto!(Hr, Hj)
+
   @views @inbounds  for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
       for urc in unrecursedcoeffs(i, ii)
         factor = prod(dots[(urc[j] + 1, urc[j-1] + 1)] for j in 2:length(urc))
-        BLAS.axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hj, :, ii + 1))
+        BLAS.axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
       end
     end
   end
-  BLAS.gemm!('N', 'C', -one(T), Hj, y, true, H) # H .-= Hj * y'
-  #@assert H ≈ Hcopy
+
+end
+function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
+
+  recurse!(H, Hj, Hr, y)
+
+  BLAS.gemm!('N', 'C', -one(T), Hr, y, true, H) # H .-= Hj * y'
 
   return nothing
 end
@@ -223,6 +220,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = zeros(T, m, bs) # the H column(s)
+  Hr = zeros(T, m, bs) # the H column(s)
   Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
@@ -252,7 +250,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       end
 
       t2 += @elapsed bs > 1 && threadedcopyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
-      t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(y, 1 + Δj:bs))
+      t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
       t2 += @elapsed if H.rank == colowner
         @views threadedcopyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
@@ -260,7 +258,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     end
 
     # now next do the next column to make it ready for the next iteration of the loop
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + bs, j - 1 + 2bs, m, n)
+    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + 2bs, m, n)
 
     # if it's not the last iteration send the next iterations Hj to all ranks
     t4 += @elapsed if j + bs <= n
@@ -281,7 +279,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     end
 
     # Apply Hj to all the columns of H to the right of this column + 2 blocks
-    t3 += @elapsed hotloop!(H, Hj, y, j, j + 2bs, n, m, n)
+    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + 2bs, n, m, n)
 
     # Now receive next iterations Hj
     t5 += @elapsed if j + bs <= n
