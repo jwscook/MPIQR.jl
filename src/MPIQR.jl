@@ -122,19 +122,20 @@ const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
 #  end
 #  return nothing
 #end
-
+#
 #function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
 #  isempty(y) && return nothing
-#  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
-#  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-##  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
-##  for j in Base.Iterators.partition(1:size(H, 2), ntile)
-##    mul!(view(y, j), view(H, :, j)', Hj)
-##    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-##    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
-##  end
+##  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
+##  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+#  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
+#  for j in Base.Iterators.partition(1:size(H, 2), ntile)
+#    mul!(view(y, j), view(H, :, j)', Hj)
+#    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+#    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
+#  end
 #  return nothing
 #end
+#
 #function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
 #    js = intersect(H, ja:jz))
 #  lja = localcolindex(H, first(js))
@@ -183,7 +184,17 @@ function unrecursedcoeffs(N, A)
   return reverse(output)
 end
 
-function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, y) where {T<:IsBitsUnion}
+function hotloop!(H::AbstractMatrix, _Hj::AbstractArray{T}, y) where {T<:IsBitsUnion}
+  Hj = deepcopy(_Hj)
+
+  #Hcopy = deepcopy(H)
+  #@views for k in 1:size(Hj, 2), jj in 1:size(Hcopy, 2)
+  #  s = sum(i->conj(Hj[i, k]) * Hcopy[i, jj], 1:size(Hj, 1))
+  #  Hcopy[:, jj] .-= Hj[:, k] * s
+  #end
+  #H .= Hcopy
+  #return nothing
+
   dots = Dict{Tuple{Int, Int}, T}()
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[(i, j)] = dot(Hj[:, i], Hj[:, j])
@@ -200,6 +211,8 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, y) where {T<:IsBitsUn
     end
   end
   BLAS.gemm!('N', 'C', -one(T), Hj, y, true, H) # H .-= Hj * y'
+  #@assert H ≈ Hcopy
+
   return nothing
 end
 
@@ -207,7 +220,7 @@ end
 function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     progress=FakeProgress()) where T
   m, n = size(H)
-  @assert m > n
+  @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = zeros(T, m, bs) # the H column(s)
   Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
