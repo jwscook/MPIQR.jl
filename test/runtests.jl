@@ -13,7 +13,7 @@ BLAS.set_num_threads(nts)
 
 using Random, ThreadPinning, ProgressMeter
 
-function run(blocksizes=(1,3), npows=(11,12), Ts=(ComplexF64,); bestof=4)
+function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
   for blocksize in blocksizes, npow in npows, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
