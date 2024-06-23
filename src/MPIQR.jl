@@ -1,6 +1,6 @@
 module MPIQR
 
-using LinearAlgebra, Base.Threads, Base.Iterators
+using LinearAlgebra, Base.Threads, Base.Iterators, Combinatorics
 using Distributed, MPI, MPIClusterManagers, Hwloc
 using ProgressMeter
 
@@ -115,35 +115,58 @@ end
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
 
-function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
-  @inbounds @views @threads :dynamic for jj in 1:size(H, 2)
-    s = sum(i->conj(Hj[i]) * H[i, jj], eachindex(Hj))
-    H[:, jj] .-= Hj * s
-  end
-  return nothing
-end
+#function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
+#  @inbounds @views @threads :dynamic for jj in 1:size(H, 2)
+#    s = sum(i->conj(Hj[i]) * H[i, jj], eachindex(Hj))
+#    H[:, jj] .-= Hj * s
+#  end
+#  return nothing
+#end
 
-function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
-  isempty(y) && return nothing
+#function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
+#  isempty(y) && return nothing
 #  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
 #  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
-  for j in Base.Iterators.partition(1:size(H, 2), ntile)
-    mul!(view(y, j), view(H, :, j)', Hj)
-    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
-  end
-  return nothing
-end
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
+##  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
+##  for j in Base.Iterators.partition(1:size(H, 2), ntile)
+##    mul!(view(y, j), view(H, :, j)', Hj)
+##    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
+##    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
+##  end
+#  return nothing
+#end
+#function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
+#    js = intersect(H, ja:jz))
+#  lja = localcolindex(H, first(js))
+#  ljz = localcolindex(H, last(js))
+#  ll = length(lja:ljz)
+#  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m), view(y, 1:ll))
+#end
+#
+#function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
+#  js = intersect(H, ja:jz)
+#  isempty(js) && return nothing
+#  viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
+#  hotloop!(viewH, viewHj, viewy)
+#  return nothing
+#end
+#
+#function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
+#  bs = blocksize(H)
+#  for Δk in 0:size(Hj, 2)-1
+#    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja, jz, m, n)
+#  end
+#end
+
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
   lja = localcolindex(H, first(js))
   ljz = localcolindex(H, last(js))
   ll = length(lja:ljz)
-  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m), view(y, 1:ll))
+  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(y, 1:ll, :))
 end
 
-function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
+function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
   js = intersect(H, ja:jz)
   isempty(js) && return nothing
   viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
@@ -151,12 +174,35 @@ function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
   return nothing
 end
 
-function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
-  bs = blocksize(H)
-  for Δk in 0:size(Hj, 2)-1
-    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja, jz, m, n)
+function unrecursedcoeffs(N, A)
+  A >= N && return Any[(N, N)]
+  output = Any[(A, N)]
+  for i in 1:N-1, c in combinations(A+1:N-1, i)
+    push!(output, (A, c..., N))
   end
+  return reverse(output)
 end
+
+function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, y) where {T<:IsBitsUnion}
+  dots = Dict{Tuple{Int, Int}, T}()
+  @views @inbounds for i in 1:size(Hj, 2), j in 1:i
+    dots[(i, j)] = dot(Hj[:, i], Hj[:, j])
+  end
+
+  BLAS.gemm!('C', 'N', true, H, Hj, false, y)
+
+  @views @inbounds  for ii in 0:size(Hj, 2) - 1
+     for i in ii + 1:size(Hj, 2) - 1
+      for urc in unrecursedcoeffs(i, ii)
+        factor = prod(dots[(urc[j] + 1, urc[j-1] + 1)] for j in 2:length(urc))
+        BLAS.axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hj, :, ii + 1))
+      end
+    end
+  end
+  BLAS.gemm!('N', 'C', -one(T), Hj, y, true, H) # H .-= Hj * y'
+  return nothing
+end
+
 
 function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     progress=FakeProgress()) where T
@@ -167,7 +213,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
-  y = zeros(eltype(H), localcolsize(H, 1:n))
+  y = zeros(eltype(H), localcolsize(H, 1:n), bs)
 
   # send the first column(s) of H to Hj on all ranks
   j = 1
@@ -187,6 +233,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
         s = norm(Hj[j + Δj:m, 1 + Δj])
         α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
         f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
+        Hj[j:j + Δj - 1, 1 + Δj] .= 0
         Hj[j + Δj, 1 + Δj] -= α[j + Δj]
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
