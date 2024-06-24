@@ -13,8 +13,8 @@ BLAS.set_num_threads(nts)
 
 using Random, ThreadPinning, ProgressMeter
 
-function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
-  for blocksize in blocksizes, npow in npows, T in Ts
+function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
+  for npow in npows, blocksize in blocksizes, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
       ThreadPinning.pinthreads(cpus)
@@ -24,12 +24,11 @@ function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
     Random.seed!(0)
     n = (2^npow ÷ blocksize) * blocksize
     m = n + 2^(npow-2)
-    A0 = zeros(T, 0, 0)
-    x1 = b0 = zeros(T, 0)
+    A0 = rand(T, m, n)
+    b0 = rand(T, m)
+    x1 = zeros(T, 0)
     if rnk == 0
       BLAS.set_num_threads(nts * sze)
-      A0 = rand(T, m, n)
-      b0 = rand(T, m)
       A1 = deepcopy(A0)
       b1 = deepcopy(b0)
       x1 = qr!(A1, NoPivot()) \ b1
@@ -41,16 +40,12 @@ function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
       t1 = minimum(t1s)
       BLAS.set_num_threads(nts)
     end
-    Aall = MPI.bcast(A0, 0, cmm)
-    ball = MPI.bcast(b0, 0, cmm)
-    xall = MPI.bcast(x1, 0, cmm)
-    x1 = xall
-
+    x1 = MPI.bcast(x1, 0, cmm)
 
     localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
-    b = deepcopy(ball)
+    b = deepcopy(b0)
 
-    A = MPIQR.MPIQRMatrix(deepcopy(Aall[:, localcols]), size(Aall); blocksize=blocksize)
+    A = MPIQR.MPIQRMatrix(deepcopy(A0[:, localcols]), size(A0); blocksize=blocksize)
     y2 = A * x1
     if iszero(rnk)
       @test y2 ≈ y1
@@ -58,7 +53,6 @@ function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
 
     MPI.Barrier(cmm)
     x2 = qr!(A) \ b
-
 
     t2s = []
     for _ in 1:bestof
@@ -72,8 +66,8 @@ function run(blocksizes=(1,2,4,8), npows=(6,8,10), Ts=(ComplexF64,); bestof=4)
     MPI.Barrier(cmm)
 
     if iszero(rnk)
-        @assert norm(Aall' * Aall * x1 .- Aall' * ball) < 1e-8
-        res = norm(Aall' * Aall * x2 .- Aall' * ball)
+        @assert norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
+        res = norm(A0' * A0 * x2 .- A0' * b0)
         try
           println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize: time=$(t2/t1)x")
           @assert res < 1e-8
