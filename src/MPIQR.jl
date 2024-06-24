@@ -232,7 +232,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   if H.rank == src
     @views threadedcopyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
   end
-  MPI.Bcast!(Hj, H.comm; root=src)
+  MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
   tmp = zeros(T, m * bs)
   @inbounds @views for j in 1:bs:n
