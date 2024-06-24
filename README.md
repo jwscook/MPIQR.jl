@@ -16,6 +16,7 @@ MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const rnk = MPI.Comm_rank(MPI.COMM_WORLD)
 
 function run(T=ComplexF64;)
+  # increase blocksize to improve usage of BLAS and decrease MPI comms
   blocksize = 2
   m, n = 2048, 1024
   A0 = zeros(T, 0, 0)
