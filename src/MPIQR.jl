@@ -190,25 +190,28 @@ function unrecursedcoeffs(N, A)
 end
 
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
-  dots = Dict{Tuple{Int, Int}, T}()
+  dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
-    dots[(i, j)] = dot(Hj[:, i], Hj[:, j])
+    dots[i, j] = dot(Hj[:, i], Hj[:, j])
   end
 
   BLAS.gemm!('C', 'N', true, H, Hj, false, y)
 
-  copyto!(Hr, Hj)
+  threadedcopyto!(Hr, Hj)
 
   @views @inbounds  for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
       for urc in unrecursedcoeffs(i, ii)
-        factor = prod(dots[(urc[j] + 1, urc[j-1] + 1)] for j in 2:length(urc))
+        factor = one(T)
+        @inbounds for j in 2:length(urc)
+          factor *= dots[urc[j] + 1, urc[j-1] + 1]
+        end
         BLAS.axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
       end
     end
   end
-
 end
+
 function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
 
   recurse!(H, Hj, Hr, y)
