@@ -180,6 +180,29 @@ function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n)
   return nothing
 end
 
+"""
+    unrecursedcoeffs(N,A)
+
+When one has
+
+H(1) = H(0) - Hj(0) Hj(0)' H(0)
+H(2) = H(1) - Hj(1) Hj(1)' H(1)
+H(N) = H(N-1) - Hj(N-1) Hj(N-1)' H(N-1)
+
+one can roll all of the multiplcations by Hj and Hj' into one matrix Hr
+by multiplying and adding various combinations of the dot products of the
+columns of Hj. This function calculates the combinations of these dot products.
+
+...
+# Arguments
+- `N`:
+- `A`:
+...
+
+# Example
+```julia
+```
+"""
 function unrecursedcoeffs(N, A)
   A >= N && return Any[(N, N)]
   output = Any[(A, N)]
@@ -189,6 +212,24 @@ function unrecursedcoeffs(N, A)
   return reverse(output)
 end
 
+"""
+    recurse!(H::AbstractMatrix,Hj::AbstractArray{T},Hr,y) where {T<:IsBitsUnion}
+
+In stead of applying the columns of `Hj` to H` sequentially, it is better to
+calculate the effective recursive action of `Hj` on `H` and store that in `Hr`
+such that `Hr` can be applied to `H` in one big gemm call.
+
+...
+# Arguments
+- `H::AbstractMatrix`: Apply the reflectors to this matrix
+- `Hj::AbstractArray{T}`: The columns that could be applied to H albeit slowly.
+- `Hr`: The effective recursed matrix of Hj to apply to H in one fast gemm call.
+...
+
+# Example
+```julia
+```
+"""
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
   dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
@@ -199,6 +240,9 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
 
   threadedcopyto!(Hr, Hj)
 
+  # this is complicated, I know, but the tests pass!
+  # It's easier to verify by deploying this logic with symbolic quantities
+  # and viewing the output
   @views @inbounds  for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
       for urc in unrecursedcoeffs(i, ii)
