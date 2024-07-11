@@ -350,29 +350,32 @@ end
 
 function solve_householder!(b, H, α; verbose=false)
   m, n = size(H)
+  bs = blocksize(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), length(b))
+  b2 = zeros(eltype(b), length(b))
   ta = tb = tc = td = te = tf = 0.0
-  @inbounds @views for j in 1:n
-    if in(j, H.localcolumns)
-      ta += @elapsed s = dot(H[j:m, j], b[j:m])
-      tb += @elapsed b1[j:m] .= H[j:m, j] .* s
-    else
-      b1[j:m] .= 0
+  @inbounds @views for j in 1:bs:n
+    b1[j:m] .= 0
+    blockrank = columnowner(H, j)
+    if H.rank == blockrank
+      for jj in 0:bs-1
+        @assert columnowner(H, j) == blockrank
+        ta += @elapsed s = dot(H[j+jj:m, j+jj], b[j+jj:m])
+        tb += @elapsed b2[j+jj:m] .= H[j+jj:m, j+jj] .* s
+        tb += @elapsed b[j+jj:m] .-= b2[j+jj:m]
+        tb += @elapsed b1[j+jj:m] .+= b2[j+jj:m]
+      end
     end
     tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
-    b[j:m] .-= b1[j:m]
-    b1[j] = 0
+    if H.rank != blockrank
+      b[j:m] .-= b1[j:m]
+    end
+    b1[j:j+bs-1] .= 0
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  td += @elapsed MPI.Barrier(H.comm)
   @inbounds @views for i in n:-1:1
-    #bis = zeros(eltype(b), Threads.nthreads())
-    #te += @elapsed @threads for j in collect(intersect(H, i+1:n))
-    #  bis[Threads.threadid()] += H[i, j] * b[j]
-    #end
-    #bi = sum(bis)
     bi = zero(eltype(b))
     te += @elapsed @inbounds for j in intersect(H, i+1:n)
       bi += H[i, j] * b[j]
@@ -393,13 +396,15 @@ end
 
 MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
 
-function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress())
+function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=false)
   H = MPIQRStruct(A)
-  householder!(H.A, H.α; progress=progress)
+  householder!(H.A, H.α; progress=progress, verbose=verbose)
   return H
 end
 
-LinearAlgebra.:(\)(H::MPIQRStruct, b) = solve_householder!(b, H.A, H.α)
+function LinearAlgebra.:(\)(H::MPIQRStruct, b; verbose=false)
+  return solve_householder!(b, H.A, H.α; verbose=verbose)
+end
 
 end
 
