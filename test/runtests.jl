@@ -13,7 +13,7 @@ BLAS.set_num_threads(nts)
 
 using Random, ThreadPinning, ProgressMeter
 
-function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
+function run(blocksizes=(1,2,3,4), npows=(8,10,), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
     @static if Sys.islinux()
       cpus = rnk * nts:(rnk + 1) * nts
@@ -69,7 +69,8 @@ function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
         @assert norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
         res = norm(A0' * A0 * x2 .- A0' * b0)
         try
-          println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize: time=$(t2/t1)x")
+          println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize:")
+          println("tLAPACK = $t1, tMPIQR = $t2, ratio=$(t2/t1)x")
           @assert res < 1e-8
           println("    PASSED: norm of residual = $res")
         catch
