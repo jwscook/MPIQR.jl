@@ -323,10 +323,10 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
           @inbounds tmp[k+=1] = H[ii, jj]
         end
         for r in filter(!=(src), 0:H.commsize-1)
-          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=(j + bs) + n * r))
+          push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
         end
       else
-        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=(j + bs) + n * H.rank))
+        push!(reqs, MPI.Irecv!(tmp, H.comm; source=src, tag=j + bs))
       end
     end
 
