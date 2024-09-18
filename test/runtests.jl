@@ -52,7 +52,9 @@ function run(blocksizes=(1,2,3,4), npows=(8,10,), Ts=(ComplexF64,); bestof=4)
     end
 
     MPI.Barrier(cmm)
-    x2 = qr!(A) \ b
+    #x2 = qr!(A) \ b
+    x2 = ldiv!(qr!(A, progress=Progress(A, dt=1; showspeed=true)),
+               b, verbose=false, progress=Progress(A, dt=0.1; showspeed=true))
 
     t2s = []
     for _ in 1:bestof
