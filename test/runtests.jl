@@ -11,7 +11,7 @@ const nts = Threads.nthreads()
 
 BLAS.set_num_threads(nts)
 
-using Random, ThreadPinning, ProgressMeter
+using Random, ProgressMeter
 
 function run(blocksizes=(1,2,3,4), npows=(8,10,), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
@@ -50,16 +50,16 @@ function run(blocksizes=(1,2,3,4), npows=(8,10,), Ts=(ComplexF64,); bestof=4)
     if iszero(rnk)
       @test y2 ≈ y1
     end
-
     MPI.Barrier(cmm)
     #x2 = qr!(A) \ b
-    x2 = ldiv!(qr!(A, progress=Progress(A, dt=1; showspeed=true)),
-               b, verbose=false, progress=Progress(A, dt=0.1; showspeed=true))
+    dt = iszero(rnk) ? 1 : 2^31
+    x2 = ldiv!(qr!(A, progress=Progress(A, dt=dt; showspeed=true)),
+               b, verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
 
     t2s = []
     for _ in 1:bestof
       push!(t2s, @elapsed begin
-        progress = Progress(A, dt=1; showspeed=true)
+        progress = Progress(A, dt=dt; showspeed=true)
         qr!(A; progress=progress) \ b
       end)
     end

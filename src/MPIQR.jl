@@ -1,16 +1,13 @@
 module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators, Combinatorics
-using Distributed, MPI, MPIClusterManagers, Hwloc
-using ProgressMeter
-
-const L2CACHESIZEBYTES = Hwloc.cachesize().L2
+using MPI, MPIClusterManagers, ProgressMeter
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
 
-struct MPIQRMatrix{T} <: AbstractMatrix{T}
-  localmatrix::Matrix{T}
+struct MPIQRMatrix{T,M<:AbstractMatrix{T}} <: AbstractMatrix{T}
+  localmatrix::M
   globalsize::Tuple{Int64, Int64}
   localcolumns::Vector{Int}
   columnlookup::Vector{Int}
@@ -288,7 +285,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       linearviewHj = reshape(viewHj, length(tmp))
       copyto!(linearviewHj, tmp)
     end
-    iszero(H.rank) && next!(progress)
+    next!(progress)
   end
   ts = (t1, t2, t3, t4, t5)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
@@ -331,7 +328,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
     b[i] -= bi
     b[i] /= α[i]
-    iszero(H.rank) && next!(progress)
+    next!(progress)
   end
   ts = (ta, tb, tc, td, te)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
