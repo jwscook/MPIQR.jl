@@ -106,9 +106,6 @@ function Base.intersect(A::MPIQRMatrix, cols)
   return output
 end
 
-const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
-  Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
-
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
   lja = localcolindex(H, first(js))
@@ -158,7 +155,7 @@ function unrecursedcoeffs(N, A)
 end
 
 """
-    recurse!(H::AbstractMatrix,Hj::AbstractArray{T},Hr,y) where {T<:IsBitsUnion}
+    recurse!(H::AbstractMatrix,Hj::AbstractArray{T},Hr,y) where {T}
 
 In stead of applying the columns of `Hj` to H` sequentially, it is better to
 calculate the effective recursive action of `Hj` on `H` and store that in `Hr`
@@ -175,7 +172,7 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```julia
 ```
 """
-function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
+function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[i, j] = dot(Hj[:, i], Hj[:, j])
@@ -201,7 +198,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
   end
 end
 
-function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
+function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 
   recurse!(H, Hj, Hr, y)
 
