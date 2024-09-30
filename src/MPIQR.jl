@@ -19,7 +19,7 @@ struct MPIQRMatrix{T,M<:AbstractMatrix{T}} <: AbstractMatrix{T}
 end
 
 function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
-  iszero(n ÷ c) || return [0]
+  iszero(numcols ÷ commsize) || return [0]
   return findall(iszero(numcols % i) for i in 1:(numcols ÷ commsize))
 end
 
@@ -45,7 +45,10 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
   end
-  @assert size(localmatrix, 2) == length(localcols)
+  if size(localmatrix, 2) != length(localcols)
+    raise(ArgumentError(
+      "This rank's matrix must have the same number of columns as all the others"))
+  end
 
   lookupop(j) = (x = searchsortedfirst(localcols, j); isnothing(x) ? 0 : x)
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
@@ -176,7 +179,7 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```
 """
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
-  dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
+  dots = similar(H, size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[i, j] = dot(Hj[:, i], Hj[:, j])
   end
@@ -211,17 +214,17 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
 end
 
 
-function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
-    progress=FakeProgress()) where T
+function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2));
+    verbose=false, progress=FakeProgress()) where {T,M}
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  Hj = zeros(T, m, bs) # the H column(s)
-  Hr = zeros(T, m, bs) # the H column(s)
-  Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
+  Hj = similar(H.localmatrix, m, bs) # the H column(s)
+  Hr = similar(H.localmatrix , m, bs) # the H column(s)
+  Hjcopy = bs > 1 ? similar(H.localmatrix, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
-  y = zeros(eltype(H), localcolsize(H, 1:n), bs)
+  y = similar(H.localmatrix, localcolsize(H, 1:n), bs)
 
   # send the first column(s) of H to Hj on all ranks
   j = 1
@@ -231,7 +234,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   end
   MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
-  tmp = zeros(T, m * bs)
+  tmp = similar(H.localmatrix, m * bs)
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
 
@@ -297,8 +300,8 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
   # multuply by Q' ...
-  b1 = zeros(eltype(b), length(b))
-  b2 = zeros(eltype(b), length(b))
+  b1 = similar(b, length(b))
+  b2 = similar(b, length(b))
   ta = tb = tc = td = te = 0.0
   @inbounds @views for j in 1:bs:n
     b1[j:m] .= 0
@@ -340,7 +343,7 @@ struct MPIQRStruct{T1, T2}
   α::T2
 end
 
-MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
+MPIQRStruct(A::MPIQRMatrix{T,M}) where {T,M} = MPIQRStruct(A, similar(A.localmatrix, size(A, 2)))
 
 function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=false)
   H = MPIQRStruct(A)
