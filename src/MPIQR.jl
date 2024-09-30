@@ -21,6 +21,10 @@ struct MPIQRMatrix{T} <: AbstractMatrix{T}
   commsize::Int64
 end
 
+function validblocksizes(n::Integer, commsize::Integer)
+  return findall(iszero(n % i) for i in 1:(n ÷ commsize))
+end
+
 function localcolumns(rnk, n, blocksize, commsize)
   return vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
 end
@@ -238,7 +242,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
 
   BLAS.gemm!('C', 'N', true, H, Hj, false, y)
 
-  threadedcopyto!(Hr, Hj)
+  copyto!(Hr, Hj)
 
   # this is complicated, I know, but the tests pass!
   # It's easier to verify by deploying this logic with symbolic quantities
@@ -282,7 +286,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @views threadedcopyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
+    @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
   end
   MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
@@ -301,11 +305,11 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
 
-      t2 += @elapsed bs > 1 && threadedcopyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
+      t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
       t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
       t2 += @elapsed if H.rank == colowner
-        @views threadedcopyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+        @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
       end
     end
 
@@ -338,7 +342,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       MPI.Waitall(reqs)
       viewHj = view(Hj, j+bs:m, 1:bs)
       linearviewHj = reshape(viewHj, length(tmp))
-      threadedcopyto!(linearviewHj, tmp)
+      copyto!(linearviewHj, tmp)
     end
     iszero(H.rank) && next!(progress)
   end
@@ -348,13 +352,13 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
 end
 
 
-function solve_householder!(b, H, α; verbose=false)
+function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), length(b))
   b2 = zeros(eltype(b), length(b))
-  ta = tb = tc = td = te = tf = 0.0
+  ta = tb = tc = td = te = 0.0
   @inbounds @views for j in 1:bs:n
     b1[j:m] .= 0
     blockrank = columnowner(H, j)
@@ -377,14 +381,15 @@ function solve_householder!(b, H, α; verbose=false)
   # we may back sub with R
   @inbounds @views for i in n:-1:1
     bi = zero(eltype(b))
-    te += @elapsed @inbounds for j in intersect(H, i+1:n)
+    td += @elapsed @inbounds for j in intersect(H, i+1:n)
       bi += H[i, j] * b[j]
     end
-    tf += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
+    te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
     b[i] -= bi
     b[i] /= α[i]
+    iszero(H.rank) && next!(progress)
   end
-  ts = (ta, tb, tc, td, te, tf)
+  ts = (ta, tb, tc, td, te)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
   return b[1:n]
 end
@@ -402,9 +407,11 @@ function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=fals
   return H
 end
 
-function LinearAlgebra.:(\)(H::MPIQRStruct, b; verbose=false)
-  return solve_householder!(b, H.A, H.α; verbose=verbose)
+function LinearAlgebra.ldiv!(H::MPIQRStruct, b; progress=FakeProgress(),
+                             verbose=false)
+  return solve_householder!(b, H.A, H.α; progress=progress, verbose=verbose)
 end
+LinearAlgebra.:(\)(H::MPIQRStruct, b) = ldiv!(H, deepcopy(b))
 
 end
 
