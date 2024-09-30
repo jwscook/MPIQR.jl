@@ -1,16 +1,13 @@
 module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators, Combinatorics
-using Distributed, MPI, MPIClusterManagers, Hwloc
-using ProgressMeter
-
-const L2CACHESIZEBYTES = Hwloc.cachesize().L2
+using MPI, MPIClusterManagers, ProgressMeter
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
 
-struct MPIQRMatrix{T} <: AbstractMatrix{T}
-  localmatrix::Matrix{T}
+struct MPIQRMatrix{T,M<:AbstractMatrix{T}} <: AbstractMatrix{T}
+  localmatrix::M
   globalsize::Tuple{Int64, Int64}
   localcolumns::Vector{Int}
   columnlookup::Vector{Int}
@@ -21,8 +18,9 @@ struct MPIQRMatrix{T} <: AbstractMatrix{T}
   commsize::Int64
 end
 
-function validblocksizes(n::Integer, commsize::Integer)
-  return findall(iszero(n % i) for i in 1:(n ÷ commsize))
+function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
+  iszero(numcols ÷ commsize) || return [0]
+  return findall(iszero(numcols % i) for i in 1:(numcols ÷ commsize))
 end
 
 function localcolumns(rnk, n, blocksize, commsize)
@@ -108,65 +106,8 @@ function Base.intersect(A::MPIQRMatrix, cols)
   return output
 end
 
-function threadedcopyto!(a, b)
-  @assert length(a) == length(b)
-#  if Threads.nthreads() == 1 || length(a) < 2^12
-    @inbounds @simd for i in eachindex(a, b)
-      a[i] = b[i]
-    end
-#  else
-#    @inbounds @threads :static for i in eachindex(a, b)
-#      a[i] = b[i]
-#    end
-#  end
-end
-
 const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
   Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
-
-#function hotloop!(H::AbstractMatrix, Hj::AbstractVector, y)
-#  @inbounds @views @threads :dynamic for jj in 1:size(H, 2)
-#    s = sum(i->conj(Hj[i]) * H[i, jj], eachindex(Hj))
-#    H[:, jj] .-= Hj * s
-#  end
-#  return nothing
-#end
-#
-#function hotloop!(H::AbstractMatrix{T}, Hj::AbstractVector, y) where {T<:IsBitsUnion}
-#  isempty(y) && return nothing
-##  mul!(y, H', Hj) # same as BLAS.gemv!('C', true, H, Hj, false, y)
-##  BLAS.ger!(-one(T), Hj, y, H) # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#  ntile = clamp(sizeof(H) ÷ L2CACHESIZEBYTES, 1, size(H, 2))
-#  for j in Base.Iterators.partition(1:size(H, 2), ntile)
-#    mul!(view(y, j), view(H, :, j)', Hj)
-#    # ger!(alpha, x, y, A) A = alpha*x*y' + A.
-#    BLAS.ger!(-one(T), Hj, view(y, j), view(H, :, j))
-#  end
-#  return nothing
-#end
-#
-#function hotloopviews(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n,
-#    js = intersect(H, ja:jz))
-#  lja = localcolindex(H, first(js))
-#  ljz = localcolindex(H, last(js))
-#  ll = length(lja:ljz)
-#  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m), view(y, 1:ll))
-#end
-#
-#function hotloop!(H::MPIQRMatrix, Hj::AbstractVector, y, j, ja, jz, m, n)
-#  js = intersect(H, ja:jz)
-#  isempty(js) && return nothing
-#  viewH, viewHj, viewy = hotloopviews(H, Hj, y, j, ja, jz, m, n, js)
-#  hotloop!(viewH, viewHj, viewy)
-#  return nothing
-#end
-#
-#function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, y, j, ja, jz, m, n)
-#  bs = blocksize(H)
-#  for Δk in 0:size(Hj, 2)-1
-#    hotloop!(H, view(Hj, :, 1 + Δk), y, j + Δk, ja, jz, m, n)
-#  end
-#end
 
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
@@ -344,7 +285,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       linearviewHj = reshape(viewHj, length(tmp))
       copyto!(linearviewHj, tmp)
     end
-    iszero(H.rank) && next!(progress)
+    next!(progress)
   end
   ts = (t1, t2, t3, t4, t5)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
@@ -387,7 +328,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
     b[i] -= bi
     b[i] /= α[i]
-    iszero(H.rank) && next!(progress)
+    next!(progress)
   end
   ts = (ta, tb, tc, td, te)
   verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))

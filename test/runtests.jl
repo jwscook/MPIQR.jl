@@ -45,15 +45,17 @@ function run(blocksizes=(1,2,3,4), npows=(12,14), Ts=(ComplexF64,); bestof=4)
     if iszero(rnk)
       @test y2 ≈ y1
     end
-
     MPI.Barrier(cmm)
-    qrA = qr!(A; progress=Progress(A, dt=1; showspeed=true))
-    x2 = ldiv!(qrA, b; verbose=false, progress=Progress(A, dt=0.1; showspeed=true))
+    #x2 = qr!(A) \ b
+    dt = iszero(rnk) ? 1 : 2^31
+    x2 = ldiv!(qr!(A, progress=Progress(A, dt=dt; showspeed=true)),
+               b, verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
 
     t2s = []
     for _ in 1:bestof
       push!(t2s, @elapsed begin
-        qr!(A) \ b
+        progress = Progress(A, dt=dt; showspeed=true)
+        qr!(A; progress=progress) \ b
       end)
     end
     t2 = minimum(t2s)
