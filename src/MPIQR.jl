@@ -179,7 +179,8 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
     dots[i, j] = dot(Hj[:, i], Hj[:, j])
   end
 
-  BLAS.gemm!('C', 'N', true, H, Hj, false, y)
+  #BLAS.gemm!('C', 'N', true, H, Hj, false, y) # y = H' * Hj
+  mul!(y, H', Hj, true, false) # y = H' * Hj
 
   copyto!(Hr, Hj)
 
@@ -203,7 +204,8 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 
   recurse!(H, Hj, Hr, y)
 
-  BLAS.gemm!('N', 'C', -one(T), Hr, y, true, H) # H .-= Hj * y'
+  #BLAS.gemm!('N', 'C', -one(T), Hr, y, true, H) # H .-= Hj * y'
+  mul!(H, Hr, y', -1, true) # H .-= Hj * y'
 
   return nothing
 end
