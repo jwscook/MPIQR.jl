@@ -25,7 +25,12 @@ function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
 end
 
 function localcolumns(rnk, n, blocksize, commsize)
-  return vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
+  output = vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
+  @assert length(output) > 0 (rnk, n, blocksize, commsize)
+  @assert minimum(output) >= 1
+  @assert maximum(output) <= n
+  @assert issorted(output)
+  return output
 end
 localcolumns(A::MPIQRMatrix) = A.localcolumns
 localmatrix(A::MPIQRMatrix) = A.localmatrix
@@ -38,10 +43,6 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   m, n = globalsize
   @assert mod(n, blocksize) == 0
   localcols = localcolumns(rnk, n, blocksize, commsize)
-  @assert length(localcols) > 0
-  @assert minimum(localcols) >= 1
-  @assert maximum(localcols) <= n
-  @assert issorted(localcols)
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
@@ -110,8 +111,11 @@ function Base.intersect(A::MPIQRMatrix, cols)
   return output
 end
 
-const IsBitsUnion = Union{Float32, Float64, ComplexF32, ComplexF64,
-  Vector{Float32}, Vector{Float64}, Vector{ComplexF32}, Vector{ComplexF64}}
+function assign!(H::MPIQRMatrix, is, js, rhs)
+  lja = localcolindex(H, first(js))
+  ljz = localcolindex(H, last(js))
+  H.localmatrix[is, lja:ljz] .= rhs
+end
 
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
@@ -162,7 +166,7 @@ function unrecursedcoeffs(N, A)
 end
 
 """
-    recurse!(H::AbstractMatrix,Hj::AbstractArray{T},Hr,y) where {T<:IsBitsUnion}
+    recurse!(H::AbstractMatrix,Hj::AbstractArray{T},Hr,y) where {T}
 
 In stead of applying the columns of `Hj` to H` sequentially, it is better to
 calculate the effective recursive action of `Hj` on `H` and store that in `Hr`
@@ -179,7 +183,7 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```julia
 ```
 """
-function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
+function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   dots = zeros(eltype(H), size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[i, j] = dot(Hj[:, i], Hj[:, j])
@@ -206,7 +210,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
   end
 end
 
-function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
+function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 
   recurse!(H, Hj, Hr, y)
 
@@ -245,12 +249,13 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
     # process all the first bs column(s) of H
     @inbounds for Δj in 0:bs-1 # can't do @views because of indexing into H
       t1 += @elapsed @views begin
-        s = norm(Hj[j + Δj:m, 1 + Δj])
-        @. α[j + Δj:j + Δj] = s * alphafactor(Hj[j + Δj:j + Δj, 1 + Δj])
-        f = @. 1 / sqrt(s * (s + abs(Hj[j + Δj:j + Δj, 1 + Δj])))
-        Hj[j:j + Δj - 1, 1 + Δj] .= 0
-        @. Hj[j + Δj:j + Δj, 1 + Δj] -= α[j + Δj:j + Δj]
-        Hj[j + Δj:m, 1 + Δj] .*= f
+        jj = j + Δj
+        s = norm(Hj[jj:m, 1 + Δj])
+        α[jj:jj] .= s .* alphafactor.(Hj[jj:jj, 1 + Δj])
+        f = 1 / sqrt(s * (s + abs(sum(Hj[jj:jj, 1 + Δj]))))
+        Hj[j:jj - 1, 1 + Δj] .= 0
+        Hj[jj:jj, 1 + Δj] .-= α[jj:jj]
+        Hj[jj:m, 1 + Δj] .*= f
       end
 
       #t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
@@ -259,7 +264,7 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
 
       t2 += @elapsed if H.rank == colowner
         #@views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
-        copyto!(H[j + Δj:m, j + Δj:j-1+bs], (@view Hj[j + Δj:m, 1 + Δj:bs]))
+        assign!(H, j + Δj:m, j + Δj:j-1+bs, view(Hj, j + Δj:m, 1 + Δj:bs))
       end
     end
 
