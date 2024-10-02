@@ -2,6 +2,7 @@ module MPIQR
 
 using LinearAlgebra, Base.Threads, Base.Iterators, Combinatorics
 using MPI, MPIClusterManagers, ProgressMeter
+using LinearAlgebra.BLAS
 
 alphafactor(x::Real) = -sign(x)
 alphafactor(x::Complex) = -exp(im * angle(x))
@@ -179,12 +180,13 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```
 """
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBitsUnion}
-  dots = similar(H, size(Hj, 2), size(Hj, 2)) # faster than a dict
+  dots = zeros(eltype(H), size(Hj, 2), size(Hj, 2)) # faster than a dict
   @views @inbounds for i in 1:size(Hj, 2), j in 1:i
     dots[i, j] = dot(Hj[:, i], Hj[:, j])
   end
 
-  BLAS.gemm!('C', 'N', true, H, Hj, false, y)
+#  gemm!('C', 'N', true, H, Hj, false, y)
+  mul!(y, H', Hj, true, false)
 
   copyto!(Hr, Hj)
 
@@ -208,7 +210,8 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T<:IsBi
 
   recurse!(H, Hj, Hr, y)
 
-  BLAS.gemm!('N', 'C', -one(T), Hr, y, true, H) # H .-= Hj * y'
+#  BLAS.gemm!('N', 'C', -one(T), Hr, y, true, H) # H .-= Hj * y'
+  mul!(H, Hr, y', -1, true)
 
   return nothing
 end
@@ -230,30 +233,33 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    @views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs])
+    #@views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs]) # CPU
+    Hj[j:m, :] .= H[j:m, j:j - 1 + bs] # GPU
   end
   MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
   tmp = similar(H.localmatrix, m * bs)
-  @inbounds @views for j in 1:bs:n
+  @inbounds for j in 1:bs:n
     colowner = columnowner(H, j)
 
     # process all the first bs column(s) of H
-    @inbounds for Δj in 0:bs-1
+    @inbounds for Δj in 0:bs-1 # can't do @views because of indexing into H
       t1 += @elapsed @views begin
         s = norm(Hj[j + Δj:m, 1 + Δj])
-        α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
-        f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
+        @. α[j + Δj:j + Δj] = s * alphafactor(Hj[j + Δj:j + Δj, 1 + Δj])
+        f = @. 1 / sqrt(s * (s + abs(Hj[j + Δj:j + Δj, 1 + Δj])))
         Hj[j:j + Δj - 1, 1 + Δj] .= 0
-        Hj[j + Δj, 1 + Δj] -= α[j + Δj]
+        @. Hj[j + Δj:j + Δj, 1 + Δj] -= α[j + Δj:j + Δj]
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
 
-      t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
+      #t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
+      t2 += @elapsed bs > 1 && (view(Hjcopy, j+Δj:m, 1) .= view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
       t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
       t2 += @elapsed if H.rank == colowner
-        @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+        #@views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+        copyto!(H[j + Δj:m, j + Δj:j-1+bs], (@view Hj[j + Δj:m, 1 + Δj:bs]))
       end
     end
 
@@ -268,7 +274,8 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
       if H.rank == src
         k = 0
         for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
-          @inbounds tmp[k+=1] = H[ii, jj]
+          k += 1
+          @inbounds tmp[k:k] .= H[ii:ii, jj:jj]
         end
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
@@ -303,7 +310,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   b1 = similar(b, length(b))
   b2 = similar(b, length(b))
   ta = tb = tc = td = te = 0.0
-  @inbounds @views for j in 1:bs:n
+  @inbounds for j in 1:bs:n # can't do @views for CuArray
     b1[j:m] .= 0
     blockrank = columnowner(H, j)
     if H.rank == blockrank
@@ -323,14 +330,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds @views for i in n:-1:1
+  @inbounds for i in n:-1:1# can't assume @views with CuArray
     bi = zero(eltype(b))
     td += @elapsed @inbounds for j in intersect(H, i+1:n)
-      bi += H[i, j] * b[j]
+      bi += sum(H[i:i, j:j] .* b[j:j])
     end
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    b[i] -= bi
-    b[i] /= α[i]
+    b[i:i] .-= bi
+    b[i:i] ./= α[i:i]
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
