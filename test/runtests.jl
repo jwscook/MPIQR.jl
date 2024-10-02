@@ -13,14 +13,8 @@ BLAS.set_num_threads(nts)
 
 using Random, ProgressMeter
 
-function run(blocksizes=(1,2,3,4), npows=(8,10,), Ts=(ComplexF64,); bestof=4)
+function run(blocksizes=(1,2,3,4), npows=(8,10,12), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
-    @static if Sys.islinux()
-      cpus = rnk * nts:(rnk + 1) * nts
-      ThreadPinning.pinthreads(cpus)
-#      ThreadPinning.pinthreads_mpi(:sockets, rnk, sze)
-    end
-
     Random.seed!(0)
     n = (2^npow ÷ blocksize) * blocksize
     m = n + 2^(npow-2)
