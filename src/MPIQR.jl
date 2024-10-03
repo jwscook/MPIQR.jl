@@ -111,10 +111,10 @@ function Base.intersect(A::MPIQRMatrix, cols)
   return output
 end
 
-function assign!(H::MPIQRMatrix, is, js, rhs)
+function Base.view(H::MPIQRMatrix, is, js)
   lja = localcolindex(H, first(js))
   ljz = localcolindex(H, last(js))
-  H.localmatrix[is, lja:ljz] .= rhs
+  return view(H.localmatrix, is, lja:ljz)
 end
 
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
@@ -237,8 +237,7 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
   j = 1
   src = columnowner(H, j)
   if H.rank == src
-    #@views copyto!(Hj[j:m, :], H[j:m, j:j - 1 + bs]) # CPU
-    Hj[j:m, :] .= H[j:m, j:j - 1 + bs] # GPU
+    copyto!(view(Hj, j:m, :), view(H, j:m, j:j - 1 + bs))
   end
   MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
@@ -258,13 +257,11 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
         Hj[jj:m, 1 + Δj] .*= f
       end
 
-      #t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
-      t2 += @elapsed bs > 1 && (view(Hjcopy, j+Δj:m, 1) .= view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
+      t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
       t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
       t2 += @elapsed if H.rank == colowner
-        #@views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
-        assign!(H, j + Δj:m, j + Δj:j-1+bs, view(Hj, j + Δj:m, 1 + Δj:bs))
+        copyto!(view(H, j + Δj:m, j + Δj:j-1+bs), view(Hj, j + Δj:m, 1 + Δj:bs))
       end
     end
 
@@ -303,10 +300,9 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
     next!(progress)
   end
   ts = (t1, t2, t3, t4, t5)
-  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && @show ts
   return MPIQRStruct(H, α)
 end
-
 
 function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
@@ -321,7 +317,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed s = dot(H[j+jj:m, j+jj], b[j+jj:m])
+        ta += @elapsed s = dot(view(H, j+jj:m, j+jj), view(b, j+jj:m))
         tb += @elapsed b2[j+jj:m] .= H[j+jj:m, j+jj] .* s
         tb += @elapsed b[j+jj:m] .-= b2[j+jj:m]
         tb += @elapsed b1[j+jj:m] .+= b2[j+jj:m]
@@ -346,7 +342,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
-  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && @show ts
   return b[1:n]
 end
 
