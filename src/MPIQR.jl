@@ -194,7 +194,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
         @inbounds for j in 2:length(urc)
           factor *= dots[urc[j] + 1, urc[j-1] + 1]
         end
-        BLAS.axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
+        axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
       end
     end
   end
