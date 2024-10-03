@@ -288,7 +288,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     next!(progress)
   end
   ts = (t1, t2, t3, t4, t5)
-  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && @show ts
   return MPIQRStruct(H, α)
 end
 
@@ -331,7 +331,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
-  verbose && H.rank == 0 && @show (ts ./ sum(ts)..., sum(ts))
+  verbose && @show ts
   return b[1:n]
 end
 
