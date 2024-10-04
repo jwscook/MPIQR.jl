@@ -250,10 +250,10 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
       t1 += @elapsed @views begin
         jj = j + Δj
         s = norm(Hj[jj:m, 1 + Δj])
-        α[jj:jj] .= s .* alphafactor.(Hj[jj:jj, 1 + Δj])
-        f = 1 / sqrt(s * (s + abs(sum(Hj[jj:jj, 1 + Δj]))))
+        view(α, jj) .= s .* alphafactor.(view(Hj, jj, 1 + Δj))
+        f = 1 / sqrt(s * (s + abs(sum(view(Hj, jj, 1 + Δj)))))
         Hj[j:jj - 1, 1 + Δj] .= 0
-        Hj[jj:jj, 1 + Δj] .-= α[jj:jj]
+        view(Hj, jj, 1 + Δj) .-= view(α, jj)
         Hj[jj:m, 1 + Δj] .*= f
       end
 
@@ -277,7 +277,7 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
         k = 0
         for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
           k += 1
-          @inbounds tmp[k:k] .= H[ii:ii, jj:jj]
+          @inbounds view(tmp, k) .= view(H, ii, jj)
         end
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
@@ -312,33 +312,38 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   b2 = similar(b, length(b))
   ta = tb = tc = td = te = 0.0
   @inbounds for j in 1:bs:n # can't do @views for CuArray
-    b1[j:m] .= 0
+    tb += @elapsed b1[j:m] .= 0
     blockrank = columnowner(H, j)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
         ta += @elapsed s = dot(view(H, j+jj:m, j+jj), view(b, j+jj:m))
         tb += @elapsed b2[j+jj:m] .= H[j+jj:m, j+jj] .* s
-        tb += @elapsed b[j+jj:m] .-= b2[j+jj:m]
-        tb += @elapsed b1[j+jj:m] .+= b2[j+jj:m]
+        tb += @elapsed b[j+jj:m] .-= view(b2, j+jj:m)
+        tb += @elapsed b1[j+jj:m] .+= view(b2, j+jj:m)
       end
     end
     tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
     if H.rank != blockrank
-      b[j:m] .-= b1[j:m]
+      tb += @elapsed b[j:m] .-= view(b1, j:m)
     end
-    b1[j:j+bs-1] .= 0
+    tb += @elapsed b1[j:j+bs-1] .= 0
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds for i in n:-1:1# can't assume @views with CuArray
+  #
+  jitervec = Vector{Int}(undef, localsize(H, 2))
+  td += @elapsed view(b, n) ./= view(α, n) # not iterating from n, but n-1, hence this line
+  @inbounds for i in n-1:-1:1# can't assume @views with CuArray
     bi = zero(eltype(b))
-    td += @elapsed @inbounds for j in intersect(H, i+1:n)
-      bi += sum(H[i:i, j:j] .* b[j:j])
+    td += @elapsed jiter = intersect(H, i+1:n)
+    td += @elapsed resize!(jitervec, length(jiter))
+    td += @elapsed jitervec .= jiter
+    td += @elapsed if !isempty(jitervec)
+      bi += transpose(b[jitervec]) * view(H, i, jitervec) # can't do transpose(view)
     end
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    b[i:i] .-= bi
-    b[i:i] ./= α[i:i]
+    td += @elapsed view(b, i) .= (view(b, i) .- bi) ./ view(α, i)
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
