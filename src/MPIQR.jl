@@ -320,14 +320,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds @views for i in n:-1:1
+  b[n] /= α[n] # because iteration doesnt start at n
+  @inbounds @views for i in n-1:-1:1
     bi = zero(eltype(b))
     td += @elapsed @inbounds for j in intersect(H, i+1:n)
       bi += H[i, j] * b[j]
     end
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    b[i] -= bi
-    b[i] /= α[i]
+    b[i] = (b[i] - bi) / α[i]
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
