@@ -304,6 +304,11 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
   return MPIQRStruct(H, α)
 end
 
+function dotu_bcast(x::AbstractArray, y::AbstractArray)
+  return reduce(+, Base.Broadcast.Broadcasted(*, (x, values(y))),
+    init = zero(eltype(x)) * zero(eltype(y)))
+end
+
 function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
@@ -331,16 +336,17 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  #
   jitervec = Vector{Int}(undef, localsize(H, 2))
-  td += @elapsed view(b, n) ./= view(α, n) # not iterating from n, but n-1, hence this line
+  td += @elapsed view(b, n) ./= view(α, n) # not iterating from n, but n-1
   @inbounds for i in n-1:-1:1# can't assume @views with CuArray
     bi = zero(eltype(b))
     td += @elapsed jiter = intersect(H, i+1:n)
-    td += @elapsed resize!(jitervec, length(jiter))
-    td += @elapsed jitervec .= jiter
-    td += @elapsed if !isempty(jitervec)
-      bi += transpose(b[jitervec]) * view(H, i, jitervec) # can't do transpose(view)
+    td += @elapsed @inbounds if !isempty(jiter)
+      jview = view(jitervec, 1:length(jiter))
+      jview .= jiter
+      if !isempty(jitervec)
+        bi += dotu_bcast(view(b, jview), view(H, i, jview)) # can't do transpose(view)
+      end
     end
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
     td += @elapsed view(b, i) .= (view(b, i) .- bi) ./ view(α, i)
