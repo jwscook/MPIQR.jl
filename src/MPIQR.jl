@@ -58,7 +58,14 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   @assert maximum(columnlookup) <= n
   return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, blocksize, rnk, comm, commsize)
 end
-columnowner(A::MPIQRMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
+
+function columnowner(A::MPIQRMatrix, j)::Int
+  for (i, cols) in enumerate(A.colsets)
+    in(j, cols) && return i - 1
+  end
+  @assert false "Shouldn't be able to get here"
+  return -1
+end
 
 Base.size(A::MPIQRMatrix) = A.globalsize
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
@@ -100,6 +107,7 @@ end
 Base.first(cii::ColumnIntersectionIterator) = cii.localcolumns[first(cii.indices)]
 Base.last(cii::ColumnIntersectionIterator) = cii.localcolumns[last(cii.indices)]
 Base.length(cii::ColumnIntersectionIterator) = length(cii.indices)
+Base.view(cii::ColumnIntersectionIterator) = view(cii.localcolumns, cii.indices)
 
 function Base.intersect(A::MPIQRMatrix, cols)
   indexa = searchsortedfirst(A.localcolumns, first(cols))
@@ -339,8 +347,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     bi = zero(eltype(b))
     td += @elapsed jiter = intersect(H, i+1:n)
     td += @elapsed @inbounds if !isempty(jiter)
-      jview = view(jitervec, 1:length(jiter))
-      jview .= jiter
+      jview = view(jiter)
       if !isempty(jitervec)
         bi += dotu_bcast(view(b, jview), view(H, i, jview)) # can't do transpose(view)
       end
