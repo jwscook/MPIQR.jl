@@ -54,7 +54,14 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   @assert maximum(columnlookup) <= n
   return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, blocksize, rnk, comm, commsize)
 end
-columnowner(A::MPIQRMatrix, j) = findfirst(in(j, s) for s in A.colsets) - 1
+
+function columnowner(A::MPIQRMatrix, j)::Int
+  for (i, cols) in enumerate(A.colsets)
+    in(j, cols) && return i - 1
+  end
+  @assert false "Shouldn't be able to get here"
+  return -1
+end
 
 Base.size(A::MPIQRMatrix) = A.globalsize
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
@@ -317,7 +324,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  b[n] /= α[n] # because iteration doesnt start at n
+  @inbounds b[n] /= α[n] # because iteration doesnt start at n
   @inbounds @views for i in n-1:-1:1
     bi = zero(eltype(b))
     td += @elapsed @inbounds for j in intersect(H, i+1:n)
