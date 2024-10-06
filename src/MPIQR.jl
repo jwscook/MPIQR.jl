@@ -147,10 +147,10 @@ columns of Hj. This function calculates the combinations of these dot products.
 ```
 """
 function unrecursedcoeffs(N, A)
-  A >= N && return Any[(N, N)]
-  output = Any[(A, N)]
+  A >= N && return [[N, N]]
+  output = [[A, N]]
   for i in 1:N-1, c in combinations(A+1:N-1, i)
-    push!(output, (A, c..., N))
+    push!(output, [A, c..., N])
   end
   return reverse(output)
 end
@@ -187,7 +187,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   # this is complicated, I know, but the tests pass!
   # It's easier to verify by deploying this logic with symbolic quantities
   # and viewing the output
-  @views @inbounds  for ii in 0:size(Hj, 2) - 1
+  @views @inbounds for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
       for urc in unrecursedcoeffs(i, ii)
         factor = one(T)
@@ -298,7 +298,6 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   bs = blocksize(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), length(b))
-  b2 = zeros(eltype(b), length(b))
   ta = tb = tc = td = te = 0.0
   @inbounds @views for j in 1:bs:n
     b1[j:m] .= 0
@@ -307,16 +306,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
         ta += @elapsed s = dot(H[j+jj:m, j+jj], b[j+jj:m])
-        tb += @elapsed b2[j+jj:m] .= H[j+jj:m, j+jj] .* s
-        tb += @elapsed b[j+jj:m] .-= b2[j+jj:m]
-        tb += @elapsed b1[j+jj:m] .+= b2[j+jj:m]
+        tb += @elapsed b[j+jj:m] .-= H[j+jj:m, j+jj] .* s
+        tb += @elapsed b1[j+jj:m] .+= H[j+jj:m, j+jj] .* s
       end
     end
     tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
     if H.rank != blockrank
       b[j:m] .-= b1[j:m]
     end
-    b1[j:j+bs-1] .= 0
   end
   # now that b holds the value of Q'b
   # we may back sub with R
