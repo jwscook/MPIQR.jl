@@ -159,7 +159,8 @@ function unrecursedcoeffs(N, A)
   for i in 1:N-1, c in combinations(A+1:N-1, i)
     push!(output, [A, c..., N])
   end
-  return reverse(output)
+  reverse!(output)
+  return output
 end
 
 """
@@ -182,9 +183,8 @@ such that `Hr` can be applied to `H` in one big gemm call.
 """
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
-  @views @inbounds for i in 1:size(Hj, 2), j in 1:i
-    dots[i, j] = dot(Hj[:, i], Hj[:, j])
-  end
+  # dots only really needs values in: for i in 1:size(Hj, 2), j in 1:i
+  mul!(dots, Hj', Hj, true, false) # some of this calculation is redundent
 
   #BLAS.gemm!('C', 'N', true, H, Hj, false, y) # y = H' * Hj
   mul!(y, H', Hj, true, false) # y = H' * Hj
@@ -196,13 +196,15 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   # and viewing the output
   @views @inbounds for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
+      summand = zero(T)
       for urc in unrecursedcoeffs(i, ii)
-        factor = one(T)
+        factor = -(-1)^length(urc) * one(T)
         @inbounds for j in 2:length(urc)
           factor *= dots[urc[j] + 1, urc[j-1] + 1]
         end
-        axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
+        summand += factor
       end
+      axpy!(summand, view(Hj, :, i + 1), view(Hr, :, ii + 1))
     end
   end
 end
@@ -270,10 +272,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
       if H.rank == src
-        k = 0
-        for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
-          @inbounds tmp[k+=1] = H[ii, jj]
-        end
+        @inbounds tmp .= reshape(view(H, j+bs:m, j+bs:j-1+2bs), (m-j-bs+1) * bs)
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
         end
