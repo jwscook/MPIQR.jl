@@ -206,17 +206,17 @@ function recurse!(H, Hj, Hr, y)
   # this is complicated, I know, but the tests pass!
   # It's easier to verify by deploying this logic with symbolic quantities
   # and viewing the output
-  @views @inbounds for ii in 0:size(Hj, 2) - 1
-     for i in ii + 1:size(Hj, 2) - 1
+  @views @inbounds for ii in 1:size(Hj, 2)
+     for i in ii + 1:size(Hj, 2)
       summand = zero(T)
-      for urc in unrecursedcoeffs(i, ii)
+      for urc in unrecursedcoeffs(i - 1, ii - 1)
         factor = -one(T) * (-1)^length(urc)
         @inbounds for j in 2:length(urc)
           factor *= dots[urc[j] + 1, urc[j-1] + 1]
         end
         summand += factor
       end
-      axpy!(summand, view(Hj, :, i + 1), view(Hr, :, ii + 1))
+      axpy!(summand, view(Hj, :, i), view(Hr, :, ii))
     end
   end
 end
@@ -266,8 +266,8 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
     @inbounds for Δj in 0:bs-1 # can't do @views because of indexing into H
       t1 += @elapsed @views begin
         jj = j + Δj
-        #s = norm(view(Hj, jj:m, 1 + Δj))
-        s = norm_bcast(view(Hj, jj:m, 1 + Δj))
+        s = norm(view(Hj, jj:m, 1 + Δj))
+        #s = norm_bcast(view(Hj, jj:m, 1 + Δj))
         #s = sqrt(real(dot(view(Hj, jj:m, 1 + Δj), view(Hj, jj:m, 1 + Δj))))
         view(α, jj) .= s .* alphafactor.(view(Hj, jj, 1 + Δj))
         f = 1 / sqrt(s * (s + abs(sum(view(Hj, jj, 1 + Δj)))))
