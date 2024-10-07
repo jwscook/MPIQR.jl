@@ -164,13 +164,14 @@ columns of Hj. This function calculates the combinations of these dot products.
 ```julia
 ```
 """
-function unrecursedcoeffs(N::T, A::T) where T
+function unrecursedcoeffs(N::Int, A::Int)
   A >= N && return [[N, N]]
   output = [[A, N]]
   for i in 1:N-1, c in combinations(A+1:N-1, i)
     push!(output, [A, c..., N])
   end
-  return reverse(output)
+  reverse!(output)
+  return output
 end
 
 """
@@ -191,11 +192,11 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```julia
 ```
 """
-function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
-  dots = zeros(eltype(H), size(Hj, 2), size(Hj, 2)) # faster than a dict
-  @views @inbounds for i in 1:size(Hj, 2), j in 1:i
-    dots[i, j] = dot(Hj[:, i], Hj[:, j])
-  end
+function recurse!(H, Hj, Hr, y)
+  T = promote_type(eltype(H), eltype(Hj))
+  dots = similar(H, size(Hj, 2), size(Hj, 2)) # faster than a dict
+  mul!(dots, Hj', Hj, true, false)
+  dots = Matrix(dots) # a no-op in CPU code
 
 #  gemm!('C', 'N', true, H, Hj, false, y)
   mul!(y, H', Hj, true, false)
@@ -207,13 +208,15 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   # and viewing the output
   @views @inbounds for ii in 0:size(Hj, 2) - 1
      for i in ii + 1:size(Hj, 2) - 1
+      summand = zero(T)
       for urc in unrecursedcoeffs(i, ii)
-        factor = one(T)
+        factor = -one(T) * (-1)^length(urc)
         @inbounds for j in 2:length(urc)
           factor *= dots[urc[j] + 1, urc[j-1] + 1]
         end
-        axpy!(-(-1)^length(urc) * factor, view(Hj, :, i + 1), view(Hr, :, ii + 1))
+        summand += factor
       end
+      axpy!(summand, view(Hj, :, i + 1), view(Hr, :, ii + 1))
     end
   end
 end
@@ -229,13 +232,19 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 end
 
 
+function norm_bcast(x::AbstractArray)
+  return sqrt(reduce(+, Base.Broadcast.Broadcasted(
+     z->real(z) * real(z) + imag(z) * imag(z), (x,));
+    init=zero(real(eltype(x))) ))
+end
+
 function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2));
     verbose=false, progress=FakeProgress()) where {T,M}
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = similar(H.localmatrix, m, bs) # the H column(s)
-  Hr = similar(H.localmatrix , m, bs) # the H column(s)
+  Hr = similar(H.localmatrix, m, bs) # the H column(s)
   Hjcopy = bs > 1 ? similar(H.localmatrix, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
@@ -257,7 +266,9 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
     @inbounds for Δj in 0:bs-1 # can't do @views because of indexing into H
       t1 += @elapsed @views begin
         jj = j + Δj
-        s = norm(Hj[jj:m, 1 + Δj])
+        #s = norm(view(Hj, jj:m, 1 + Δj))
+        s = norm_bcast(view(Hj, jj:m, 1 + Δj))
+        #s = sqrt(real(dot(view(Hj, jj:m, 1 + Δj), view(Hj, jj:m, 1 + Δj))))
         view(α, jj) .= s .* alphafactor.(view(Hj, jj, 1 + Δj))
         f = 1 / sqrt(s * (s + abs(sum(view(Hj, jj, 1 + Δj)))))
         Hj[j:jj - 1, 1 + Δj] .= 0
@@ -282,11 +293,7 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
       src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
       if H.rank == src
-        k = 0
-        for (cj, jj) in enumerate(j + bs:j - 1 + 2bs), (ci, ii) in enumerate(j+bs:m)
-          k += 1
-          @inbounds view(tmp, k) .= view(H, ii, jj)
-        end
+        @inbounds tmp .= reshape(view(H, j+bs:m, j+bs:j-1+2bs), (m-j-bs+1) * bs)
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
         end
@@ -313,8 +320,8 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
 end
 
 function dotu_bcast(x::AbstractArray, y::AbstractArray)
-  return reduce(+, Base.Broadcast.Broadcasted(*, (x, values(y))),
-    init = zero(eltype(x)) * zero(eltype(y)))
+  return reduce(+, Base.Broadcast.Broadcasted(*, (x, values(y)));
+    init=zero(eltype(x)) * zero(eltype(y)))
 end
 
 function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
