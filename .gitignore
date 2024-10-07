@@ -1,0 +1,4 @@
+**/*.mem
+**/*.swp
+**/*.zip
+statprof
