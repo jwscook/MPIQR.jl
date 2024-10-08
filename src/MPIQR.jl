@@ -227,7 +227,6 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = zeros(T, m, bs) # the H column(s)
   Hr = zeros(T, m, bs) # the H column(s)
-  Hjcopy = bs > 1 ? zeros(T, m) : Hj # copy of the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
   y = zeros(eltype(H), localcolsize(H, 1:n), bs)
@@ -255,8 +254,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
         Hj[j + Δj:m, 1 + Δj] .*= f
       end
 
-      t2 += @elapsed bs > 1 && copyto!(view(Hjcopy, j+Δj:m, 1), view(Hj, j+Δj:m, 1 + Δj)) # prevent data race
-      t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hjcopy, j+Δj:m, 1), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
+      t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1+Δj), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
       t2 += @elapsed if H.rank == colowner
         @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
