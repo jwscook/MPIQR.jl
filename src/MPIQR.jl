@@ -262,17 +262,18 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
     colowner = columnowner(H, j)
 
     # process all the first bs column(s) of H
-    @inbounds for Δj in 0:bs-1 # can't do @views because of indexing into H
-      t1 += @elapsed @views begin
+    @inbounds for Δj in 0:bs-1
+      t1 += @elapsed begin
         jj = j + Δj
-        s = norm(view(Hj, jj:m, 1 + Δj))
-        #s = norm_bcast(view(Hj, jj:m, 1 + Δj))
-        #s = sqrt(real(dot(view(Hj, jj:m, 1 + Δj), view(Hj, jj:m, 1 + Δj))))
+        #s = norm(view(Hj, jj:m, 1 + Δj))
+        viewHj = view(Hj, jj:m, 1 + Δj)
+        #s = norm_bcast(viewHj)
+        s = sqrt(real(dot(viewHj, viewHj)))
         view(α, jj) .= s .* alphafactor.(view(Hj, jj, 1 + Δj))
         f = 1 / sqrt(s * (s + abs(sum(view(Hj, jj, 1 + Δj)))))
-        Hj[j:jj - 1, 1 + Δj] .= 0
+        view(Hj, j:jj - 1, 1 + Δj) .= 0
         view(Hj, jj, 1 + Δj) .-= view(α, jj)
-        Hj[jj:m, 1 + Δj] .*= f
+        view(Hj, jj:m, 1 + Δj) .*= f
       end
 
       t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1+Δj), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
