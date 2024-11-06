@@ -20,7 +20,7 @@ function run(blocksizes=(1,2,3,4), npows=(12,), Ts=(ComplexF64,); bestof=4)
     n = (2^npow ÷ blocksize) * blocksize
     m = n + 2^(npow-2)
     A0 = rand(T, m, n)
-    b0 = rand(T, m)
+    b0 = rand(T, m, 2)
     x1 = zeros(T, 0)
     if rnk == 0
       BLAS.set_num_threads(nts * sze)
@@ -79,3 +79,4 @@ end
 run()
 
 MPI.Finalize()
+

@@ -69,8 +69,8 @@ Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
-function Base.:*(A::MPIQRMatrix{T}, x::AbstractVector{U}) where {T,U}
-  y = A.localmatrix * x[A.localcolumns]
+function Base.:*(A::MPIQR.MPIQRMatrix{T, M}, x::AbstractMatrix{U}) where {T, M<:AbstractMatrix{T}, U}
+  y = A.localmatrix * view(x, A.localcolumns, :)
   return MPI.Allreduce(y, +, A.comm)
 end
 
@@ -301,39 +301,40 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
   # multuply by Q' ...
-  b1 = zeros(eltype(b), length(b))
+  b1 = zeros(eltype(b), size(b))
   ta = tb = tc = td = te = 0.0
   @inbounds @views for j in 1:bs:n
-    b1[j:m] .= 0
+    b1[j:m, :] .= 0
     blockrank = columnowner(H, j)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed s = dot(H[j+jj:m, j+jj], b[j+jj:m])
-        tb += @elapsed b[j+jj:m] .-= H[j+jj:m, j+jj] .* s
-        tb += @elapsed b1[j+jj:m] .+= H[j+jj:m, j+jj] .* s
+        ta += @elapsed s = H[j+jj:m, j+jj]' * b[j+jj:m, :]
+        tb += @elapsed b[j+jj:m, :] .-= H[j+jj:m, j+jj] * s
+        tb += @elapsed b1[j+jj:m, :] .+= H[j+jj:m, j+jj] * s
       end
     end
     tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
     if H.rank != blockrank
-      b[j:m] .-= b1[j:m]
+      b[j:m, :] .-= b1[j:m, :]
     end
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds b[n] /= α[n] # because iteration doesnt start at n
+  @inbounds @views b[n, :] ./= α[n] # because iteration doesnt start at n
+  bi = zeros(eltype(b), size(b, 2))
   @inbounds @views for i in n-1:-1:1
-    bi = zero(eltype(b))
+    bi .= 0
     td += @elapsed @inbounds for j in intersect(H, i+1:n)
-      bi += H[i, j] * b[j]
+      @. bi += H[i, j] * b[j, :]
     end
     te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    b[i] = (b[i] - bi) / α[i]
+    @. b[i, :] = (b[i, :] - bi) / α[i]
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
   verbose && @show ts
-  return b[1:n]
+  return b[1:n, :]
 end
 
 struct MPIQRStruct{T1, T2}
