@@ -2,6 +2,7 @@ using MPIQR
 
 using LinearAlgebra, Random, Base.Threads, Test
 using MPI, Distributed, MPIClusterManagers
+using CUDA
 
 MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const cmm = MPI.COMM_WORLD
@@ -19,7 +20,7 @@ function run(blocksizes=(1,2,3,4), npows=(8,10,12), Ts=(ComplexF64,); bestof=4)
     n = (2^npow ÷ blocksize) * blocksize
     m = n + 2^(npow-2)
     A0 = rand(T, m, n)
-    b0 = rand(T, m)
+    b0 = rand(T, m, 2)
     x1 = zeros(T, 0)
     if rnk == 0
       BLAS.set_num_threads(nts * sze)
@@ -37,12 +38,12 @@ function run(blocksizes=(1,2,3,4), npows=(8,10,12), Ts=(ComplexF64,); bestof=4)
     x1 = MPI.bcast(x1, 0, cmm)
 
     localcols = MPIQR.localcolumns(rnk, n, blocksize, sze)
-    b = deepcopy(b0)
+    b = CuArray(b0)
 
-    A = MPIQR.MPIQRMatrix(deepcopy(A0[:, localcols]), size(A0); blocksize=blocksize)
-    y2 = A * x1
+    A = MPIQR.MPIQRMatrix(CuArray(A0[:, localcols]), size(A0); blocksize=blocksize)
+    y2 = A * CuArray(x1)
     if iszero(rnk)
-      @test y2 ≈ y1
+      @test Matrix(y2) ≈ Matrix(y1)
     end
     MPI.Barrier(cmm)
     #x2 = qr!(A) \ b
@@ -62,16 +63,16 @@ function run(blocksizes=(1,2,3,4), npows=(8,10,12), Ts=(ComplexF64,); bestof=4)
     MPI.Barrier(cmm)
 
     if iszero(rnk)
-        @assert norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
-        res = norm(A0' * A0 * x2 .- A0' * b0)
-        try
-          println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize:")
-          println("tLAPACK = $t1, tMPIQR = $t2, ratio=$(t2/t1)x")
-          @assert res < 1e-8
-          println("    PASSED: norm of residual = $res")
-        catch
-          println("    FAILED: norm of residual = $res")
-        end
+      @assert norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
+      res = norm(A0' * A0 * Matrix(x2) .- A0' * b0)
+      try
+        println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize:")
+        println("tLAPACK = $t1, tMPIQR = $t2, ratio=$(t2/t1)x")
+        @assert res < 1e-8
+        println("    PASSED: norm of residual = $res")
+      catch
+        println("    FAILED: norm of residual = $res")
+      end
     end
   end
 end

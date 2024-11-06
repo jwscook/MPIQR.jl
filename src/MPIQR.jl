@@ -73,9 +73,10 @@ Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
-function Base.:*(A::MPIQRMatrix{T}, x::AbstractVector{U}) where {T,U}
-  y = A.localmatrix * x[A.localcolumns]
-  return MPI.Allreduce(y, +, A.comm)
+function Base.:*(A::MPIQR.MPIQRMatrix{T, M}, x::AbstractMatrix{U}) where {T, M<:AbstractMatrix{T}, U}
+  y = A.localmatrix * x[A.localcolumns, :] # can't use views for gpus
+  MPI.Allreduce!(y, +, A.comm)
+  return y
 end
 
 localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
@@ -318,53 +319,52 @@ function householder!(H::MPIQRMatrix{T,M}, α=similar(H.localmatrix, size(H, 2))
   return MPIQRStruct(H, α)
 end
 
-function dotu_bcast(x::AbstractArray, y::AbstractArray)
-  return reduce(+, Base.Broadcast.Broadcasted(*, (x, values(y)));
-    init=zero(eltype(x)) * zero(eltype(y)))
-end
-
 function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
   # multuply by Q' ...
-  b1 = similar(b, length(b))
+  b1 = similar(b, size(b))
+  s = similar(b, (1, size(b, 2)))
   ta = tb = tc = td = te = 0.0
   @inbounds for j in 1:bs:n
-    tb += @elapsed b1[j:m] .= 0
+    tb += @elapsed b1[j:m, :] .= 0
     blockrank = columnowner(H, j)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed s = dot(view(H, j+jj:m, j+jj), view(b, j+jj:m))
-        tb += @elapsed view(b, j+jj:m) .-= view(H, j+jj:m, j+jj) .* s
-        tb += @elapsed view(b1, j+jj:m) .+= view(H, j+jj:m, j+jj) .* s
+        ta += @elapsed s .= view(H, j+jj:m, j+jj)' * view(b, j+jj:m, :)
+        tb += @elapsed view(b, j+jj:m, :) .-= view(H, j+jj:m, j+jj) * s
+        tb += @elapsed view(b1, j+jj:m, :) .+= view(H, j+jj:m, j+jj) * s
       end
     end
-    tc += @elapsed MPI.Allreduce!(view(b1, j:m), +, H.comm)
+    #tc += @elapsed MPI.Allreduce!(view(b1, j:m, :), +, H.comm)
+    tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
     if H.rank != blockrank
-      tb += @elapsed b[j:m] .-= view(b1, j:m)
+      tb += @elapsed b[j:m, :] .-= view(b1, j:m, :)
     end
   end
   # now that b holds the value of Q'b
   # we may back sub with R
   jitervec = Vector{Int}(undef, localsize(H, 2))
-  td += @elapsed view(b, n) ./= view(α, n) # not iterating from n, but n-1
+  td += @elapsed view(b, n, :) ./= view(α, n) # not iterating from n, but n-1
+  bi = similar(b, (1, size(b, 2)))
   @inbounds for i in n-1:-1:1# can't assume @views with CuArray
-    bi = zero(eltype(b))
+    bi .= 0
     td += @elapsed jiter = intersect(H, i+1:n)
     td += @elapsed @inbounds if !isempty(jiter)
       jview = view(jiter)
       if !isempty(jitervec)
-        bi += dotu_bcast(view(b, jview), view(H, i, jview)) # can't do transpose(view)
+        # can't do transpose(view)
+        bi .+= sum(H[i, jview] .* b[jview, :], dims=1)
       end
     end
-    te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    td += @elapsed view(b, i) .= (view(b, i) .- bi) ./ view(α, i)
+    te += @elapsed MPI.Allreduce!(bi, +, H.comm)
+    td += @elapsed view(b, i, :) .= (view(b, i, :) .- transpose(bi)) ./ view(α, i)
     next!(progress)
   end
   ts = (ta, tb, tc, td, te)
   verbose && @show ts
-  return b[1:n]
+  return b[1:n, :]
 end
 
 struct MPIQRStruct{T1, T2}
