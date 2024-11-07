@@ -302,6 +302,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   bs = blocksize(H)
   # multuply by Q' ...
   b1 = zeros(eltype(b), size(b))
+  s = zeros(promote_type(eltype(b), eltype(H)), (1, size(b, 2)))
   ta = tb = tc = td = te = 0.0
   @inbounds @views for j in 1:bs:n
     b1[j:m, :] .= 0
@@ -309,7 +310,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed s = H[j+jj:m, j+jj]' * b[j+jj:m, :]
+        ta += @elapsed s .= H[j+jj:m, j+jj]' * b[j+jj:m, :]
         tb += @elapsed b[j+jj:m, :] .-= H[j+jj:m, j+jj] * s
         tb += @elapsed b1[j+jj:m, :] .+= H[j+jj:m, j+jj] * s
       end
