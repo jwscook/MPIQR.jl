@@ -48,8 +48,8 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
   end
   if size(localmatrix, 2) != length(localcols)
-    raise(ArgumentError(
-      "This rank's matrix must have the same number of columns as all the others"))
+    throw(ArgumentError(
+      "This rank's matrix must have the right number of local columns"))
   end
 
   lookupop(j) = (x = searchsortedfirst(localcols, j); isnothing(x) ? 0 : x)
@@ -73,7 +73,8 @@ Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
-function Base.:*(A::MPIQR.MPIQRMatrix{T, M}, x::AbstractMatrix{U}) where {T, M<:AbstractMatrix{T}, U}
+function Base.:*(A::MPIQR.MPIQRMatrix{T, M}, x::AbstractArray{U,N}
+    ) where {T, M<:AbstractMatrix{T}, U, N}
   y = A.localmatrix * x[A.localcolumns, :] # can't use views for gpus
   MPI.Allreduce!(y, +, A.comm)
   return y
