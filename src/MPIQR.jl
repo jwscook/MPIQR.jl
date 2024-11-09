@@ -69,8 +69,11 @@ Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
-function Base.:*(A::MPIQR.MPIQRMatrix{T, M}, x::AbstractArray{U,N}
-    ) where {T, M<:AbstractMatrix{T}, U, N}
+
+# define these for dispatch purposes
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector{U}) where {T,M,U} = _mul(A, x)
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractArray{U,N}) where {T,M,U,N} = _mul(A, x)
+function _mul(A::MPIQR.MPIQRMatrix, x)
   y = A.localmatrix * view(x, A.localcolumns, :)
   return MPI.Allreduce(y, +, A.comm)
 end
