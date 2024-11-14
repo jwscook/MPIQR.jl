@@ -75,8 +75,8 @@ function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
 end
 
 # define these for dispatch purposes
-Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector{U}) where {T,M,U} = _mul(A, x)
-Base.:*(A::MPIQRMatrix{T,M}, x::AbstractArray{U,N}) where {T,M,U,N} = _mul(A, x)
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector) where {T,M} = _mul(A, x)
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractMatrix) where {T,M} = _mul(A, x)
 function _mul(A::MPIQR.MPIQRMatrix, x)
   y = A.localmatrix * x[A.localcolumns, :] # can't use views for gpus
   MPI.Allreduce!(y, +, A.comm)
