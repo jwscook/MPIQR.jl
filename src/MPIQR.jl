@@ -265,7 +265,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       end
     end
 
-    # now next do the next column to make it ready for the next iteration of the loop
+    # now do the next blocksize of colums to ready it for the next iteration
     t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + 2bs, m, n)
 
     # if it's not the last iteration send the next iterations Hj to all ranks
