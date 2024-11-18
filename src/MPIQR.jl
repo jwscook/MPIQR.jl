@@ -71,8 +71,8 @@ function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
 end
 
 # define these for dispatch purposes
-Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector{U}) where {T,M,U} = _mul(A, x)
-Base.:*(A::MPIQRMatrix{T,M}, x::AbstractArray{U,N}) where {T,M,U,N} = _mul(A, x)
+Base.:*(A::MPIQRMatrix, x::AbstractVector) = _mul(A, x)
+Base.:*(A::MPIQRMatrix, x::AbstractMatrix) = _mul(A, x)
 function _mul(A::MPIQR.MPIQRMatrix, x)
   y = A.localmatrix * view(x, A.localcolumns, :)
   return MPI.Allreduce(y, +, A.comm)
@@ -270,6 +270,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
 
     # if it's not the last iteration send the next iterations Hj to all ranks
     t4 += @elapsed if j + bs <= n
+      # make tmp the right linear length so that it accommodate all the new Hj
       resize!(tmp, (m - (j - 1 + bs)) * bs)
       src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
@@ -291,7 +292,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
       MPI.Waitall(reqs)
       viewHj = view(Hj, j+bs:m, 1:bs)
       linearviewHj = reshape(viewHj, length(tmp))
-      copyto!(linearviewHj, tmp)
+      copyto!(linearviewHj, tmp) # mutates Hj
     end
     next!(progress)
   end
