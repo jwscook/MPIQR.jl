@@ -55,6 +55,17 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   return MPIQRMatrix(localmatrix, globalsize, localcols, columnlookup, colsets, blocksize, rnk, comm, commsize)
 end
 
+"""
+    columnowner(A::MPIQRMatrix,j)::Int
+
+Return the rank of the owner of column j of matrix A.
+
+...
+# Arguments
+- `A::MPIQRMatrix`:
+- `j::Int`:
+...
+"""
 function columnowner(A::MPIQRMatrix, j)::Int
   for (i, cols) in enumerate(A.colsets)
     in(j, cols) && return i - 1
