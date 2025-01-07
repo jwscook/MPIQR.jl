@@ -1,6 +1,6 @@
+authors = ["James Cook <cookjws@gmail.com>"]
 name = "MPIQR"
 uuid = "4acd9526-7714-4958-a7d5-1632fb49fc8a"
-authors = ["James Cook <cookjws@gmail.com>"]
 version = "0.1.0"
 
 [deps]
@@ -9,6 +9,9 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MPIClusterManagers = "e7922434-ae4b-11e9-05c5-9780451d2c66"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
+
+[extras]
+MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
 
 [test]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"

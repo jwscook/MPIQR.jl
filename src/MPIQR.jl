@@ -40,7 +40,6 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   commsize = MPI.Comm_size(comm)
   @assert commsize >= 1
   m, n = globalsize
-  @assert mod(n, blocksize) == 0
   localcols = localcolumns(rnk, n, blocksize, commsize)
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
@@ -257,6 +256,8 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   tmp = zeros(T, m * bs)
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
+    bs = min(bs, n - j + 1)
+    bz = min(bs, n - j - bs + 1)
 
     # process all the first bs column(s) of H
     @inbounds for Δj in 0:bs-1
@@ -277,16 +278,16 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     end
 
     # now do the next blocksize of colums to ready it for the next iteration
-    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + 2bs, m, n)
+    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + bs + bz, m, n)
 
     # if it's not the last iteration send the next iterations Hj to all ranks
     t4 += @elapsed if j + bs <= n
       # make tmp the right linear length so that it accommodate all the new Hj
-      resize!(tmp, (m - (j - 1 + bs)) * bs)
+      resize!(tmp, (m - (j - 1 + bs)) * bz)
       src = columnowner(H, j + bs)
       reqs = Vector{MPI.Request}()
       if H.rank == src
-        @inbounds tmp .= reshape(view(H, j+bs:m, j+bs:j-1+2bs), (m-j-bs+1) * bs)
+        @inbounds tmp .= reshape(view(H, j+bs:m, j+bs:j-1+bs+bz), length(tmp))
         for r in filter(!=(src), 0:H.commsize-1)
           push!(reqs, MPI.Isend(tmp, H.comm; dest=r, tag=j + bs))
         end
@@ -296,12 +297,12 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
     end
 
     # Apply Hj to all the columns of H to the right of this column + 2 blocks
-    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + 2bs, n, m, n)
+    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs + bz, n, m, n)
 
     # Now receive next iterations Hj
     t5 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
-      viewHj = view(Hj, j+bs:m, 1:bs)
+      viewHj = view(Hj, j+bs:m, 1:bz)
       linearviewHj = reshape(viewHj, length(tmp))
       copyto!(linearviewHj, tmp) # mutates Hj
     end
@@ -323,6 +324,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   @inbounds @views for j in 1:bs:n
     b1[j:m, :] .= 0
     blockrank = columnowner(H, j)
+    bs = min(bs, n - j + 1)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
