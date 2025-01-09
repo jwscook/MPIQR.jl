@@ -24,10 +24,9 @@ function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
 end
 
 function localcolumns(rnk, n, blocksize, commsize)
-  output = vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...)
-  @assert length(output) > 0
-  @assert minimum(output) >= 1
-  @assert maximum(output) <= n
+  output = Vector{Int}(vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...))
+  @assert isempty(output) || minimum(output) >= 1
+  @assert isempty(output) || maximum(output) <= n
   @assert issorted(output)
   return output
 end
@@ -44,6 +43,10 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
+  end
+  if size(localmatrix, 2) != length(localcols)
+    throw(ArgumentError(
+      "This rank's matrix must have the right number of local columns"))
   end
   @assert size(localmatrix, 2) == length(localcols)
 
