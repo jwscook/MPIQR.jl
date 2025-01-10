@@ -17,7 +17,7 @@ using Random, ProgressMeter
 function run(blocksizes=(1,2,3,4), npows=(8,10,12), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
     Random.seed!(0)
-    n = (2^npow ÷ blocksize) * blocksize
+    n = 2^npow + 1
     m = n + 2^(npow-2)
     A0 = rand(T, m, n)
     b0 = rand(T, m, 2)
