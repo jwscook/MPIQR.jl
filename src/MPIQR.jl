@@ -66,9 +66,10 @@ function columnowner(A::MPIQRMatrix, j)::Int
 end
 
 Base.size(A::MPIQRMatrix) = A.globalsize
+Base.size(A::MPIQRMatrix, i) = A.globalsize[i]
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 
-function Base.setindex!(A::MPIQRMatrix, v::Number, i, j)
+function Base.setindex!(A::MPIQRMatrix, v, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
 end
 
@@ -375,8 +376,18 @@ struct MPIQRStruct{T1, T2}
   A::T1
   α::T2
 end
-
 MPIQRStruct(A::MPIQRMatrix{T,M}) where {T,M} = MPIQRStruct(A, similar(A.localmatrix, size(A, 2)))
+
+Base.size(s::MPIQRStruct, i=nothing) = size(s.A, i)
+Base.setindex!(s::MPIQRStruct, v, i, j) = setindex!(s.A, v, i, j)
+Base.getindex(s::MPIQRStruct, i, j) = getindex(s.A, i, j)
+
+Progress(s::MPIQRStruct, dt=1; kwargs...) = Progress(s.A, dt=dt; kwargs...)
+localcolumns(s::MPIQRStruct) = localcolumns(s.A)
+
+function LinearAlgebra.qr!(s::MPIQRStruct; progress=FakeProgress(), verbose=false)
+  return qr!(s.A; progress=progress, verbose=verbose)
+end
 
 function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=false)
   H = MPIQRStruct(A)
@@ -388,6 +399,15 @@ function LinearAlgebra.ldiv!(H::MPIQRStruct, b; progress=FakeProgress(),
                              verbose=false)
   return solve_householder!(b, H.A, H.α; progress=progress, verbose=verbose)
 end
+
+function LinearAlgebra.ldiv!(x, H::MPIQRStruct, b; progress=FakeProgress(),
+                             verbose=false)
+  c = deepcopy(b) # TODO: make this ...
+  solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
+  x .= c[1:size(x, 1), :] # .. and there this better
+  return x
+end
+
 LinearAlgebra.:(\)(H::MPIQRStruct, b) = ldiv!(H, deepcopy(b))
 
 end
