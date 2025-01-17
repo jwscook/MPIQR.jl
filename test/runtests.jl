@@ -12,8 +12,7 @@ const nts = Threads.nthreads()
 BLAS.set_num_threads(nts)
 
 using Random, ProgressMeter
-
-function run(blocksizes=(1,2,3,4), npows=(12,), Ts=(ComplexF64,); bestof=4)
+function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
 
     Random.seed!(0)
@@ -48,8 +47,13 @@ function run(blocksizes=(1,2,3,4), npows=(12,), Ts=(ComplexF64,); bestof=4)
     MPI.Barrier(cmm)
     #x2 = qr!(A) \ b
     dt = iszero(rnk) ? 1 : 2^31
-    x2 = ldiv!(qr!(A, progress=Progress(A, dt=dt; showspeed=true)),
-               b, verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
+    x2 = similar(x1)
+    qrA = qr!(A, progress=Progress(A, dt=dt; showspeed=true))
+    ldiv!(x2, qrA, b; verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
+    localcols = MPIQR.localcolumns(qrA)
+    qrA[:, localcols] .= A0[:, localcols] # re-use it
+    x3 = qrA \ b
+    @assert x2 ≈ x3
 
     t2s = []
     for _ in 1:bestof
