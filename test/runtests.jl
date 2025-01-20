@@ -14,7 +14,6 @@ BLAS.set_num_threads(nts)
 using Random, ProgressMeter
 function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
-
     Random.seed!(0)
     n = 2^npow
     m = n + 2^(npow-2)
@@ -50,10 +49,16 @@ function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
     x2 = similar(x1)
     qrA = qr!(A, progress=Progress(A, dt=dt; showspeed=true))
     ldiv!(x2, qrA, b; verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
-    localcols = MPIQR.localcolumns(qrA)
-    qrA[:, localcols] .= A0[:, localcols] # re-use it
     x3 = qrA \ b
-    @assert x2 ≈ x3
+    localcols = MPIQR.localcolumns(qrA)
+    qrA.A.localmatrix .= A0[:, localcols] # re-use it
+    @test all(qrA[:, localcols] .== A0[:, localcols]) # re-use it
+    fill!(qrA.A.localmatrix, -1) # fill with distintive value and test we overwrite it
+    qrA[:, localcols] .= A0[:, localcols] # re-use it
+    @test x2 ≈ x3
+    @test all(qrA[:, localcols] .== A0[:, localcols]) # re-use it
+    qrA[1, localcols[1]] = π
+    @test qrA[1, localcols[1]] == T(π)
 
     t2s = []
     for _ in 1:bestof
@@ -67,12 +72,12 @@ function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
     MPI.Barrier(cmm)
 
     if iszero(rnk)
-        @assert norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
+        @test norm(A0' * A0 * x1 .- A0' * b0) < 1e-8
         res = norm(A0' * A0 * x2 .- A0' * b0)
         try
           println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize:")
           println("tLAPACK = $t1, tMPIQR = $t2, ratio=$(t2/t1)x")
-          @assert res < 1e-8
+          @test res < 1e-8
           println("    PASSED: norm of residual = $res")
         catch
           println("    FAILED: norm of residual = $res")
