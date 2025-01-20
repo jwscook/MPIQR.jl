@@ -66,7 +66,7 @@ function columnowner(A::MPIQRMatrix, j)::Int
 end
 
 Base.size(A::MPIQRMatrix) = A.globalsize
-Base.size(A::MPIQRMatrix, i) = A.globalsize[i]
+Base.size(A::MPIQRMatrix, i::Integer) = A.globalsize[i]
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
 
 function Base.setindex!(A::MPIQRMatrix, v, i, j)
@@ -372,13 +372,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   return b[1:n, :]
 end
 
-struct MPIQRStruct{T1, T2}
-  A::T1
-  α::T2
+struct MPIQRStruct{T,M,Tα} <: AbstractMatrix{T}
+  A::MPIQRMatrix{T,M}
+  α::Tα
 end
 MPIQRStruct(A::MPIQRMatrix{T,M}) where {T,M} = MPIQRStruct(A, similar(A.localmatrix, size(A, 2)))
 
-Base.size(s::MPIQRStruct, i=nothing) = size(s.A, i)
+Base.size(s::MPIQRStruct) = size(s.A)
+Base.size(s::MPIQRStruct, i::Integer) = size(s.A, i)
 Base.setindex!(s::MPIQRStruct, v, i, j) = setindex!(s.A, v, i, j)
 Base.getindex(s::MPIQRStruct, i, j) = getindex(s.A, i, j)
 
@@ -394,20 +395,20 @@ function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=fals
   return qr!(MPIQRStruct(A); progress=progress, verbose=verbose)
 end
 
-function LinearAlgebra.ldiv!(H::MPIQRStruct, b; progress=FakeProgress(),
-                             verbose=false)
+function LinearAlgebra.ldiv!(H::MPIQRStruct, b::AbstractVecOrMat;
+    progress=FakeProgress(), verbose=false)
   return solve_householder!(b, H.A, H.α; progress=progress, verbose=verbose)
 end
 
-function LinearAlgebra.ldiv!(x, H::MPIQRStruct, b; progress=FakeProgress(),
-                             verbose=false)
+function LinearAlgebra.ldiv!(x::AbstractVecOrMat, H::MPIQRStruct, b::AbstractVecOrMat;
+    progress=FakeProgress(), verbose=false)
   c = deepcopy(b) # TODO: make this ...
   solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
   x .= c[1:size(x, 1), :] # .. and there this better
   return x
 end
 
-LinearAlgebra.:(\)(H::MPIQRStruct, b) = ldiv!(H, deepcopy(b))
+LinearAlgebra.:(\)(H::MPIQRStruct, b::AbstractVecOrMat) = ldiv!(H, deepcopy(b))
 
 end
 
