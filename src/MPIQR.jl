@@ -373,13 +373,14 @@ Base.getindex(s::MPIQRStruct, i, j) = getindex(s.A, i, j)
 Progress(s::MPIQRStruct, dt=1; kwargs...) = Progress(s.A, dt=dt; kwargs...)
 localcolumns(s::MPIQRStruct) = localcolumns(s.A)
 
-function LinearAlgebra.qr!(s::MPIQRStruct; progress=FakeProgress(), verbose=false)
-  return qr!(s.A; progress=progress, verbose=verbose)
+function LinearAlgebra.qr!(H::MPIQRStruct; progress=FakeProgress(), verbose=false)
+  householder!(H.A, H.α; progress=progress, verbose=verbose)
+  return H
 end
 
 function LinearAlgebra.qr!(A::MPIQRMatrix; progress=FakeProgress(), verbose=false)
   H = MPIQRStruct(A)
-  householder!(H.A, H.α; progress=progress, verbose=verbose)
+  qr!(H; progress=progress, verbose=verbose)
   return H
 end
 
