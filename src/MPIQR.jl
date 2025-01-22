@@ -322,25 +322,17 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
   # multuply by Q' ...
-  b1 = zeros(eltype(b), size(b))
-  s = zeros(promote_type(eltype(b), eltype(H)), (1, size(b, 2)))
-  ta = tb = tc = td = te = 0.0
+  ta = tb = tc = td = 0.0
   @inbounds @views for j in 1:bs:n
-    b1[j:m, :] .= 0
     blockrank = columnowner(H, j)
     bs = min(bs, n - j + 1)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed s .= H[j+jj:m, j+jj]' * b[j+jj:m, :]
-        tb += @elapsed b[j+jj:m, :] .-= H[j+jj:m, j+jj] * s
-        tb += @elapsed b1[j+jj:m, :] .+= H[j+jj:m, j+jj] * s
+        ta += @elapsed b[j+jj:m, :] .-= H[j+jj:m, j+jj] .* (H[j+jj:m, j+jj]' * b[j+jj:m, :])
       end
     end
-    tc += @elapsed MPI.Allreduce!(b1, +, H.comm)
-    if H.rank != blockrank
-      b[j:m, :] .-= b1[j:m, :]
-    end
+    tb += @elapsed MPI.Bcast!(view(b, j:m, :), H.comm; root=blockrank)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
@@ -348,14 +340,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   bi = zeros(eltype(b), size(b, 2))
   @inbounds @views for i in n-1:-1:1
     bi .= 0
-    td += @elapsed @inbounds for j in intersect(H, i+1:n)
+    tc += @elapsed @inbounds for j in intersect(H, i+1:n)
       @. bi += H[i, j] * b[j, :]
     end
-    te += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
+    td += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
     @. b[i, :] = (b[i, :] - bi) / α[i]
     next!(progress)
   end
-  ts = (ta, tb, tc, td, te)
+  ts = (ta, tb, tc, td)
   verbose && @show ts
   return b[1:n, :]
 end
