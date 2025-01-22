@@ -24,7 +24,7 @@ function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
 end
 
 function localcolumns(rnk, n, blocksize, commsize)
-  output = Vector{Int}(vcat(collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]...))
+  output = reduce(vcat, collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end])
   @assert isempty(output) || minimum(output) >= 1
   @assert isempty(output) || maximum(output) <= n
   @assert issorted(output)
