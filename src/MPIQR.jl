@@ -23,15 +23,18 @@ function validblocksizes(numcols::Integer, commsize::Integer)::Vector{Int}
   return findall(iszero(numcols % i) for i in 1:(numcols ÷ commsize))
 end
 
+localcolumns(A::MPIQRMatrix) = A.localcolumns
+localmatrix(A::MPIQRMatrix) = A.localmatrix
+
 function localcolumns(rnk, n, blocksize, commsize)
-  output = reduce(vcat, collect(partition(collect(1:n), blocksize))[rnk + 1:commsize:end]; init=Int[])
+  @assert rem(n, blocksize) == 0
+  inner(i) = ((i * n ÷ commsize ÷ blocksize) * blocksize)
+  output = (inner(rnk) + 1):inner(rnk + 1)
   @assert isempty(output) || minimum(output) >= 1
   @assert isempty(output) || maximum(output) <= n
   @assert issorted(output)
   return output
 end
-localcolumns(A::MPIQRMatrix) = A.localcolumns
-localmatrix(A::MPIQRMatrix) = A.localmatrix
 
 function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm = MPI.COMM_WORLD)
   @assert blocksize >= 1
@@ -39,7 +42,7 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   commsize = MPI.Comm_size(comm)
   @assert commsize >= 1
   m, n = globalsize
-  localcols = localcolumns(rnk, n, blocksize, commsize)
+  localcols = collect(localcolumns(rnk, n, blocksize, commsize))
   colsets = Vector{Set{Int}}()
   for r in 0:commsize-1
     push!(colsets, Set(localcolumns(r, n, blocksize, commsize)))
@@ -72,7 +75,7 @@ function columnowner(A::MPIQRMatrix, j)::Int
   for (i, cols) in enumerate(A.colsets)
     in(j, cols) && return i - 1
   end
-  @assert false "Shouldn't be able to get here"
+  @assert false "Shouldn't be able to get here\n j = $j\n colsets = $(A.colsets)"
   return -1
 end
 
@@ -349,6 +352,12 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   ts = (ta, tb, tc, td)
   verbose && @show ts
+  # now reshuffle the columns back into the correct order
+  counts = Int32.(MPI.Allgather(length(localcolumns(H)), H.comm))
+  for j in 1:size(b, 2)
+    #view(b, 1:n, j) .= MPI.Allgatherv(b[:, j], counts, H.comm)
+    MPI.Allgatherv!(b[:, j], counts, H.comm)
+  end
   return b[1:n, :]
 end
 

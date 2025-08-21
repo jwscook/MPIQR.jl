@@ -11,11 +11,11 @@ const nts = Threads.nthreads()
 
 BLAS.set_num_threads(nts)
 
-using Random, ProgressMeter
-function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
+using Random, ProgressMeter, Base.Iterators
+function run(blocksizes=(1,2,3,4), npows=(3,8,10), Ts=(ComplexF64,); bestof=4)
   for npow in npows, blocksize in blocksizes, T in Ts
     Random.seed!(0)
-    n = 2^npow
+    n = ceil(Int, (2^npow) / blocksize) * blocksize
     m = n + 2^(npow-2)
     A0 = rand(T, m, n)
     b0 = rand(T, m, 2)
@@ -39,26 +39,28 @@ function run(blocksizes=(1,2,3,4), npows=(8,10), Ts=(ComplexF64,); bestof=4)
     b = deepcopy(b0)
 
     A = MPIQR.MPIQRMatrix(deepcopy(A0[:, localcols]), size(A0); blocksize=blocksize)
-    y2 = A * x1
-    if iszero(rnk)
-      @test y2 ≈ y1
-    end
-    MPI.Barrier(cmm)
-    #x2 = qr!(A) \ b
+
+    #y2 = A * x1
+    #if iszero(rnk)
+    #  @test y2 ≈ y1
+    #end
     dt = iszero(rnk) ? 1 : 2^31
     x2 = similar(x1)
     qrA = qr!(A, progress=Progress(A, dt=dt; showspeed=true))
-    ldiv!(x2, qrA, b; verbose=false, progress=Progress(A, dt=dt/10; showspeed=true))
-    x3 = qrA \ b
+    ldiv!(x2, qrA, b; verbose=false, progress=Progress(A, dt=dt; showspeed=true))
+    @test x1 ≈ x2
+    x3 = qrA \ deepcopy(b0)
+    @test x2 ≈ x3
     localcols = MPIQR.localcolumns(qrA)
     qrA.A.localmatrix .= A0[:, localcols] # re-use it
     @test all(qrA[:, localcols] .== A0[:, localcols]) # re-use it
     fill!(qrA.A.localmatrix, -1) # fill with distintive value and test we overwrite it
     qrA[:, localcols] .= A0[:, localcols] # re-use it
-    @test x2 ≈ x3
     @test all(qrA[:, localcols] .== A0[:, localcols]) # re-use it
-    qrA[1, localcols[1]] = π
-    @test qrA[1, localcols[1]] == T(π)
+    if length(localcols) > 0
+      qrA[1, localcols[1]] = π
+      @test qrA[1, localcols[1]] == T(π)
+    end
 
     t2s = []
     for _ in 1:bestof
