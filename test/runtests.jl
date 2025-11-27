@@ -40,10 +40,10 @@ function run(blocksizes=(1,2,3,4), npows=(3,8,10), Ts=(ComplexF64,); bestof=4)
 
     A = MPIQR.MPIQRMatrix(deepcopy(A0[:, localcols]), size(A0); blocksize=blocksize)
 
-    #y2 = A * x1
-    #if iszero(rnk)
-    #  @test y2 ≈ y1
-    #end
+    y2 = A * x1
+    if iszero(rnk)
+      @test y2 ≈ y1
+    end
     dt = iszero(rnk) ? 1 : 2^31
     x2 = similar(x1)
     qrA = qr!(A, progress=Progress(A, dt=dt; showspeed=true))
