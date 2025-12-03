@@ -85,10 +85,11 @@ function Base.setindex!(A::MPIQRMatrix, v, i, j)
 end
 
 # define these for dispatch purposes
-Base.:*(A::MPIQRMatrix, x::AbstractVector) = _mul(A, x)
-Base.:*(A::MPIQRMatrix, x::AbstractMatrix) = _mul(A, x)
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector) where {T,M} = _mul(A, x)
+Base.:*(A::MPIQRMatrix{T,M}, x::AbstractMatrix) where {T,M} = _mul(A, x)
+maybeview(x, is, js) = view(x, is, js) # allow dispatch on type of x, lest x doesnt do views
 function _mul(A::MPIQR.MPIQRMatrix, x)
-  y = A.localmatrix * view(x, A.localcolumns, :)
+  y = A.localmatrix * maybeview(x, A.localcolumns, :)
   return MPI.Allreduce(y, +, A.comm)
 end
 
@@ -200,7 +201,7 @@ such that `Hr` can be applied to `H` in one big gemm call.
 ```
 """
 function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
-  dots = zeros(T, size(Hj, 2), size(Hj, 2)) # faster than a dict
+  dots = similar(Hj, size(Hj, 2), size(Hj, 2)) # doesn't have to be filled with zeros
   # dots only really needs values in: for i in 1:size(Hj, 2), j in 1:i
   mul!(dots, Hj', Hj, true, false) # some of this calculation is redundent
 
@@ -238,16 +239,16 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 end
 
 
-function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
+function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H, 2)), 0); verbose=false,
     progress=FakeProgress()) where T
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  Hj = zeros(T, m, bs) # the H column(s)
-  Hr = zeros(T, m, bs) # the H column(s)
+  Hj = similar(H.localmatrix, m, bs) # the H column(s)
+  Hr = similar(H.localmatrix, m, bs) # the H column(s)
   t1 = t2 = t3 = t4 = t5 = 0.0
   # work array for the BLAS call
-  y = zeros(eltype(H), localcolsize(H, 1:n), bs)
+  y = similar(H.localmatrix, localcolsize(H, 1:n), bs)
 
   # send the first column(s) of H to Hj on all ranks
   j = 1
@@ -257,7 +258,7 @@ function householder!(H::MPIQRMatrix{T}, α=zeros(T, size(H, 2)); verbose=false,
   end
   MPI.Bcast!(view(Hj, j:m, :), H.comm; root=src)
 
-  tmp = zeros(T, m * bs)
+  tmp = similar(H.localmatrix, m * bs)
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
     bs = min(bs, n - j + 1)
@@ -337,7 +338,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   # now that b holds the value of Q'b
   # we may back sub with R
   @inbounds @views b[n, :] ./= α[n] # because iteration doesnt start at n
-  bi = zeros(eltype(b), size(b, 2))
+  bi = similar(b, size(b, 2))
   @inbounds @views for i in n-1:-1:1
     bi .= 0
     tc += @elapsed @inbounds for j in intersect(H, i+1:n)
@@ -357,7 +358,7 @@ struct MPIQRStruct{T,M,Tα} <: AbstractMatrix{T}
   α::Tα
 end
 
-MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, zeros(eltype(A), size(A, 2)))
+MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, fill!(similar(A, size(A, 2)), 0))
 Base.size(s::MPIQRStruct) = size(s.A)
 Base.size(s::MPIQRStruct, i::Integer) = size(s.A, i)
 Base.setindex!(s::MPIQRStruct, v, i, j) = setindex!(s.A, v, i, j)
