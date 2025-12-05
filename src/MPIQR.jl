@@ -9,7 +9,7 @@ alphafactor(x::Complex) = -exp(im * angle(x))
 struct MPIQRMatrix{T,M<:AbstractMatrix{T}} <: AbstractMatrix{T}
   localmatrix::M
   globalsize::Tuple{Int64, Int64}
-  localcolumns::Vector{Int}
+  localcolumns::Vector{Int} # list of global column indices on this localmatrix
   columnlookup::Vector{Int}
   colsets::Vector{Set{Int}}
   blocksize::Int
@@ -50,7 +50,7 @@ function MPIQRMatrix(localmatrix::AbstractMatrix, globalsize; blocksize=1, comm 
   end
   @assert size(localmatrix, 2) == length(localcols)
 
-  lookupop(j) = (x = searchsortedfirst(localcols, j); isnothing(x) ? 0 : x)
+  lookupop(j) = (x = findfirst(isequal(j), localcols); isnothing(x) ? 0 : x)
   columnlookup = Vector{Int}([lookupop(j) for j in 1:n])
   @assert minimum(columnlookup) >= 0
   @assert maximum(columnlookup) <= n
@@ -90,7 +90,7 @@ Base.:*(A::MPIQRMatrix{T,M}, x::AbstractMatrix) where {T,M} = _mul(A, x)
 maybeview(x, is, js) = view(x, is, js) # allow dispatch on type of x, lest x doesnt do views
 function _mul(A::MPIQR.MPIQRMatrix, x)
   y = A.localmatrix * maybeview(x, A.localcolumns, :)
-  return MPI.Allreduce(y, +, A.comm)
+  return MPI.Allreduce!(y, +, A.comm)
 end
 
 localsize(A::MPIQRMatrix, dim=nothing) = size(A.localmatrix, dim)
@@ -110,7 +110,7 @@ struct ColumnIntersectionIterator
   indices::UnitRange{Int}
 end
 Base.@propagate_inbounds function Base.iterate(
-    iter::ColumnIntersectionIterator, state=0)
+    iter::ColumnIntersectionIterator, state=0)::Union{Nothing,Tuple{Int, Int}}
   isempty(iter.indices) && return nothing
   if state >= length(iter.indices)
     return nothing
@@ -119,26 +119,20 @@ Base.@propagate_inbounds function Base.iterate(
     return (iter.localcolumns[iter.indices[state]], state)
   end
 end
-Base.first(cii::ColumnIntersectionIterator) = cii.localcolumns[first(cii.indices)]
-Base.last(cii::ColumnIntersectionIterator) = cii.localcolumns[last(cii.indices)]
+Base.first(cii::ColumnIntersectionIterator)::Int = cii.localcolumns[first(cii.indices)]
+Base.last(cii::ColumnIntersectionIterator)::Int = cii.localcolumns[last(cii.indices)]
 Base.length(cii::ColumnIntersectionIterator) = length(cii.indices)
 
 function Base.intersect(A::MPIQRMatrix, cols)
   indexa = searchsortedfirst(A.localcolumns, first(cols))
   indexz = searchsortedlast(A.localcolumns, last(cols))
-  indexa = indexa > length(A.localcolumns) ? length(A.localcolumns) + 1 : indexa
-  indexz = indexz > length(A.localcolumns) ? 0 : indexz
-  indices = indexa:indexz
-  output = ColumnIntersectionIterator(A.localcolumns, indices)
-  return output
+  return ColumnIntersectionIterator(A.localcolumns, indexa:indexz)
 end
-
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
     js = intersect(H, ja:jz))
-  lja = localcolindex(H, first(js))
-  ljz = localcolindex(H, last(js))
-  ll = length(lja:ljz)
-  return (view(H.localmatrix, j:m, lja:ljz), view(Hj, j:m, :), view(Hr, j:m, :), view(y, 1:ll, :))
+  ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
+  ll = length(ljaz)
+  return (view(H.localmatrix, j:m, ljaz), view(Hj, j:m, :), view(Hr, j:m, :), view(y, 1:ll, :))
 end
 
 function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n)
@@ -239,7 +233,7 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 end
 
 
-function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H, 2)), 0); verbose=false,
+function householder!(H::MPIQRMatrix{T}, α=similar(H.localmatrix, size(H, 2)); verbose=false,
     progress=FakeProgress()) where T
   m, n = size(H)
   @assert m >= n
@@ -318,37 +312,57 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   return MPIQRStruct(H, α)
 end
 
+"""
+   solvedotu!(bi, H, b, i, n)
+
+Does this but in a more efficient way
+```julia
+  @inbounds for j in intersect(H, i+1:n)
+    @. bi += H[i, j] * b[j, :]
+  end
+```
+"""
+function solvedotu!(bi, H, b, i, n)
+  indexa = searchsortedfirst(H.localcolumns, i+1)
+  indexz = searchsortedlast(H.localcolumns, n)
+  iszero(indexa:indexz) && return nothing # iszero slightly more flexible than isempty
+  jiter = view(H.localcolumns, indexa:indexz)
+  mul!(transpose(bi), transpose(view(H.localmatrix, i, indexa:indexz)), view(b, jiter, :))
+  return nothing
+end
 
 function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   m, n = size(H)
   bs = blocksize(H)
-  # multuply by Q' ...
-  ta = tb = tc = td = 0.0
-  @inbounds @views for j in 1:bs:n
+  # multiply by Q' ...
+  ta = tb = tc = td = te = 0.0
+  @inbounds for j in 1:bs:n
     blockrank = columnowner(H, j)
     bs = min(bs, n - j + 1)
     if H.rank == blockrank
       for jj in 0:bs-1
         @assert columnowner(H, j) == blockrank
-        ta += @elapsed b[j+jj:m, :] .-= H[j+jj:m, j+jj] .* (H[j+jj:m, j+jj]' * b[j+jj:m, :])
+        viewbjj = view(b, j+jj:m, :) # use this view twice
+        viewHjj = view(H, j+jj:m, j+jj) # use this view twice
+        ta += @elapsed viewbjj .-= viewHjj .* (viewHjj' * viewbjj)
       end
     end
     tb += @elapsed MPI.Bcast!(view(b, j:m, :), H.comm; root=blockrank)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds @views b[n, :] ./= α[n] # because iteration doesnt start at n
+  @inbounds view(b, n, :) ./= α[n] # because iteration doesnt start at n
   bi = similar(b, size(b, 2))
   @inbounds @views for i in n-1:-1:1
-    bi .= 0
-    tc += @elapsed @inbounds for j in intersect(H, i+1:n)
-      @. bi += H[i, j] * b[j, :]
-    end
-    td += @elapsed bi = MPI.Allreduce(bi, +, H.comm)
-    @. b[i, :] = (b[i, :] - bi) / α[i]
+    fill!(bi, 0)
+    tc += @elapsed solvedotu!(bi, H, b, i, n)
+    td += @elapsed MPI.Allreduce!(bi, +, H.comm)
+    # axpby(α, x, β, y): !y .= x .* a .+ y .* β
+    invαi = 1 / α[i]
+    te += @elapsed axpby!(-invαi, bi, invαi, view(b, i, :)) # @. b[i, :] = (b[i, :] - bi) / α[i]
     next!(progress)
   end
-  ts = (ta, tb, tc, td)
+  ts = (ta, tb, tc, td, te)
   verbose && @show ts
   return b[1:n, :]
 end
@@ -387,7 +401,7 @@ function LinearAlgebra.ldiv!(x::AbstractVecOrMat, H::MPIQRStruct, b::AbstractVec
     progress=FakeProgress(), verbose=false)
   c = deepcopy(b) # TODO: make this ...
   solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
-  x .= c[1:size(x, 1), :] # .. and there this better
+  x .= view(c, 1:size(x, 1), :) # .. and there this better
   return x
 end
 
