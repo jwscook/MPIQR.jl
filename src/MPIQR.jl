@@ -87,9 +87,14 @@ end
 # define these for dispatch purposes
 Base.:*(A::MPIQRMatrix{T,M}, x::AbstractVector) where {T,M} = _mul(A, x)
 Base.:*(A::MPIQRMatrix{T,M}, x::AbstractMatrix) where {T,M} = _mul(A, x)
+LinearAlgebra.mul!(C, A::MPIQRMatrix, B) = _mul!(C, A, B)
 maybeview(x, is, js) = view(x, is, js) # allow dispatch on type of x, lest x doesnt do views
 function _mul(A::MPIQR.MPIQRMatrix, x)
-  y = A.localmatrix * maybeview(x, A.localcolumns, :)
+  T = promote_type(eltype(A), eltype(x))
+  return _mul!(zeros(T, size(A, 1), size(x, 2), A, x))
+end
+function _mul!(y, A::MPIQR.MPIQRMatrix, x)
+  y .= A.localmatrix * maybeview(x, A.localcolumns, :)
   return MPI.Allreduce!(y, +, A.comm)
 end
 
