@@ -79,6 +79,7 @@ end
 Base.size(A::MPIQRMatrix) = A.globalsize
 Base.size(A::MPIQRMatrix, i::Integer) = A.globalsize[i]
 Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
+Base.view(A::MPIQRMatrix, i, j) = view(A.localmatrix, i, localcolindex(A, j)) # helps out GPUs
 
 function Base.setindex!(A::MPIQRMatrix, v, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
@@ -91,10 +92,10 @@ LinearAlgebra.mul!(C, A::MPIQRMatrix, B) = _mul!(C, A, B)
 maybeview(x, is, js) = view(x, is, js) # allow dispatch on type of x, lest x doesnt do views
 function _mul(A::MPIQR.MPIQRMatrix, x)
   T = promote_type(eltype(A), eltype(x))
-  return _mul!(zeros(T, size(A, 1), size(x, 2), A, x))
+  return _mul!(similar(x, T, size(A, 1), size(x, 2)), A, x)
 end
 function _mul!(y, A::MPIQR.MPIQRMatrix, x)
-  y .= A.localmatrix * maybeview(x, A.localcolumns, :)
+  mul!(y, A.localmatrix, maybeview(x, A.localcolumns, :))
   return MPI.Allreduce!(y, +, A.comm)
 end
 
@@ -133,8 +134,7 @@ function Base.intersect(A::MPIQRMatrix, cols)
   indexz = searchsortedlast(A.localcolumns, last(cols))
   return ColumnIntersectionIterator(A.localcolumns, indexa:indexz)
 end
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n,
-    js = intersect(H, ja:jz))
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n, js)
   ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
   ll = length(ljaz)
   return (view(H.localmatrix, j:m, ljaz), view(Hj, j:m, :), view(Hr, j:m, :), view(y, 1:ll, :))
@@ -212,6 +212,7 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   # this is complicated, I know, but the tests pass!
   # It's easier to verify by deploying this logic with symbolic quantities
   # and viewing the output
+  dots = Matrix(dots) # a no-op in CPU mode
   @views @inbounds for ii in 1:size(Hj, 2)
      for i in ii + 1:size(Hj, 2)
       summand = zero(T)
@@ -238,14 +239,14 @@ function hotloop!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
 end
 
 
-function householder!(H::MPIQRMatrix{T}, α=similar(H.localmatrix, size(H, 2)); verbose=false,
+function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H, 2)), 0); verbose=false,
     progress=FakeProgress()) where T
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
   Hj = similar(H.localmatrix, m, bs) # the H column(s)
   Hr = similar(H.localmatrix, m, bs) # the H column(s)
-  t1 = t2 = t3 = t4 = t5 = 0.0
+  t1 = t2 = t3 = t4 = t5 = t6 = t7 = t8 = 0.0
   # work array for the BLAS call
   y = similar(H.localmatrix, localcolsize(H, 1:n), bs)
 
@@ -265,27 +266,27 @@ function householder!(H::MPIQRMatrix{T}, α=similar(H.localmatrix, size(H, 2)); 
 
     # process all the first bs column(s) of H
     @inbounds for Δj in 0:bs-1
-      t1 += @elapsed @views begin
-        s = norm(Hj[j + Δj:m, 1 + Δj])
-        α[j + Δj] = s * alphafactor(Hj[j + Δj, 1 + Δj])
-        f = 1 / sqrt(s * (s + abs(Hj[j + Δj, 1 + Δj])))
-        Hj[j:j + Δj - 1, 1 + Δj] .= 0
-        Hj[j + Δj, 1 + Δj] -= α[j + Δj]
-        Hj[j + Δj:m, 1 + Δj] .*= f
+      t1 += @elapsed s = norm(view(Hj, j + Δj:m, 1 + Δj)) # expensive
+      t2 += @elapsed begin
+        view(α, j + Δj) .= s .* alphafactor.(view(Hj, j + Δj, 1 + Δj))
+        f = 1 / sqrt(s * (s + abs(sum(view(Hj, j + Δj, 1 + Δj)))))
+        view(Hj, j:j + Δj - 1, 1 + Δj) .= 0
+        view(Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
+        view(Hj, j + Δj:m, 1 + Δj) .*= f
       end
 
       t3 += @elapsed hotloop!(view(Hj, j+Δj:m, 1 + Δj:bs), view(Hj, j+Δj:m, 1+Δj), view(Hr, j+Δj:m, 1), view(y, 1 + Δj:bs))
 
-      t2 += @elapsed if H.rank == colowner
-        @views copyto!(H[j + Δj:m, j + Δj:j-1+bs], Hj[j + Δj:m, 1 + Δj:bs])
+      t4 += @elapsed if H.rank == colowner
+        copyto!(view(H, j + Δj:m, j + Δj:j-1+bs), view(Hj, j + Δj:m, 1 + Δj:bs))
       end
     end
 
     # now do the next blocksize of colums to ready it for the next iteration
-    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + bs + bz, m, n)
+    t5 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + bs + bz, m, n)
 
     # if it's not the last iteration send the next iterations Hj to all ranks
-    t4 += @elapsed if j + bs <= n
+    t6 += @elapsed if j + bs <= n
       # make tmp the right linear length so that it accommodate all the new Hj
       resize!(tmp, (m - (j - 1 + bs)) * bz)
       src = columnowner(H, j + bs)
@@ -301,10 +302,10 @@ function householder!(H::MPIQRMatrix{T}, α=similar(H.localmatrix, size(H, 2)); 
     end
 
     # Apply Hj to all the columns of H to the right of this column + 2 blocks
-    t3 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs + bz, n, m, n)
+    t7 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs + bz, n, m, n) # expensive
 
     # Now receive next iterations Hj
-    t5 += @elapsed if j + bs <= n
+    t8 += @elapsed if j + bs <= n
       MPI.Waitall(reqs)
       viewHj = view(Hj, j+bs:m, 1:bz)
       linearviewHj = reshape(viewHj, length(tmp))
@@ -312,7 +313,7 @@ function householder!(H::MPIQRMatrix{T}, α=similar(H.localmatrix, size(H, 2)); 
     end
     next!(progress)
   end
-  ts = (t1, t2, t3, t4, t5)
+  ts = (t1, t2, t3, t4, t5, t6, t7, t8)
   verbose && @show ts
   return MPIQRStruct(H, α)
 end
@@ -332,7 +333,7 @@ function solvedotu!(bi, H, b, i, n)
   indexz = searchsortedlast(H.localcolumns, n)
   iszero(indexa:indexz) && return nothing # iszero slightly more flexible than isempty
   jiter = view(H.localcolumns, indexa:indexz)
-  mul!(transpose(bi), transpose(view(H.localmatrix, i, indexa:indexz)), view(b, jiter, :))
+  mul!(bi, transpose(view(b, jiter, :)), view(H.localmatrix, i, indexa:indexz))
   return nothing
 end
 
@@ -356,14 +357,14 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   # now that b holds the value of Q'b
   # we may back sub with R
-  @inbounds view(b, n, :) ./= α[n] # because iteration doesnt start at n
+  @inbounds view(b, n, :) ./= view(α, n) # because iteration doesnt start at n
   bi = similar(b, size(b, 2))
   @inbounds @views for i in n-1:-1:1
     fill!(bi, 0)
     tc += @elapsed solvedotu!(bi, H, b, i, n)
     td += @elapsed MPI.Allreduce!(bi, +, H.comm)
     # axpby(α, x, β, y): !y .= x .* a .+ y .* β
-    invαi = 1 / α[i]
+    invαi = 1 ./ view(α, i)
     te += @elapsed axpby!(-invαi, bi, invαi, view(b, i, :)) # @. b[i, :] = (b[i, :] - bi) / α[i]
     next!(progress)
   end
@@ -377,7 +378,7 @@ struct MPIQRStruct{T,M,Tα} <: AbstractMatrix{T}
   α::Tα
 end
 
-MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, fill!(similar(A, size(A, 2)), 0))
+MPIQRStruct(A::MPIQRMatrix) = MPIQRStruct(A, fill!(similar(A.localmatrix, size(A, 2)), 0))
 Base.size(s::MPIQRStruct) = size(s.A)
 Base.size(s::MPIQRStruct, i::Integer) = size(s.A, i)
 Base.setindex!(s::MPIQRStruct, v, i, j) = setindex!(s.A, v, i, j)
