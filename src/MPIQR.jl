@@ -134,22 +134,22 @@ function Base.intersect(A::MPIQRMatrix, cols)
   indexz = searchsortedlast(A.localcolumns, last(cols))
   return ColumnIntersectionIterator(A.localcolumns, indexa:indexz)
 end
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n, js)
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, jm, js)
   ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
   ll = length(ljaz)
-  return (view(H.localmatrix, j:m, ljaz), view(Hj, j:m, :), view(Hr, j:m, :), view(y, 1:ll, :))
+  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(Hr, jm, :), view(y, 1:ll, :))
 end
 
-function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, j, ja, jz, m, n)
-  js = intersect(H, ja:jz)
+function hotloop!(H::MPIQRMatrix, Hj::AbstractMatrix, Hr, y, jm, jaz)
+  js = intersect(H, jaz)
   isempty(js) && return nothing
-  viewH, viewHj, viewHr, viewy = hotloopviews(H, Hj, Hr, y, j, ja, jz, m, n, js)
+  viewH, viewHj, viewHr, viewy = hotloopviews(H, Hj, Hr, y, jm, js)
   hotloop!(viewH, viewHj, viewHr, viewy)
   return nothing
 end
 
 """
-    unrecursedcoeffs(N,A)
+    unrecursedotindices(N,A)
 
 When one has
 
@@ -159,7 +159,8 @@ H(N) = H(N-1) - Hj(N-1) Hj(N-1)' H(N-1)
 
 one can roll all of the multiplcations by Hj and Hj' into one matrix Hr
 by multiplying and adding various combinations of the dot products of the
-columns of Hj. This function calculates the combinations of these dot products.
+columns of Hj. This function calculates the indices of the matrix of dot products,
+that when multiplied together give the effective recursive action of Hj on H.
 
 ...
 # Arguments
@@ -171,7 +172,7 @@ columns of Hj. This function calculates the combinations of these dot products.
 ```julia
 ```
 """
-function unrecursedcoeffs(N, A)
+function unrecursedotindices(N, A)
   A >= N && return [[N, N]]
   output = [[A, N]]
   for i in 1:N-1, c in combinations(A+1:N-1, i)
@@ -216,10 +217,10 @@ function recurse!(H::AbstractMatrix, Hj::AbstractArray{T}, Hr, y) where {T}
   @views @inbounds for ii in 1:size(Hj, 2)
      for i in ii + 1:size(Hj, 2)
       summand = zero(T)
-      for urc in unrecursedcoeffs(i - 1, ii - 1)
-        factor = -(-1)^length(urc) * one(T)
-        @inbounds for j in 2:length(urc)
-          factor *= dots[urc[j] + 1, urc[j-1] + 1]
+      for urdi in unrecursedotindices(i - 1, ii - 1)
+        factor = -(-1)^length(urdi) * one(T)
+        @inbounds for j in 2:length(urdi)
+          factor *= dots[urdi[j] + 1, urdi[j-1] + 1]
         end
         summand += factor
       end
@@ -269,7 +270,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
       t1 += @elapsed s = norm(view(Hj, j + Δj:m, 1 + Δj)) # expensive
       t2 += @elapsed begin
         view(α, j + Δj) .= s .* alphafactor.(view(Hj, j + Δj, 1 + Δj))
-        f = 1 / sqrt(s * (s + abs(sum(view(Hj, j + Δj, 1 + Δj)))))
+        f = 1 ./ sqrt.(s .* (s .+ abs.(view(Hj, j + Δj, 1 + Δj))))
         view(Hj, j:j + Δj - 1, 1 + Δj) .= 0
         view(Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
         view(Hj, j + Δj:m, 1 + Δj) .*= f
@@ -283,7 +284,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
     end
 
     # now do the next blocksize of colums to ready it for the next iteration
-    t5 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs, j - 1 + bs + bz, m, n)
+    t5 += @elapsed hotloop!(H, Hj, Hr, y, j:m, (j + bs):(j - 1 + bs + bz))
 
     # if it's not the last iteration send the next iterations Hj to all ranks
     t6 += @elapsed if j + bs <= n
@@ -302,7 +303,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
     end
 
     # Apply Hj to all the columns of H to the right of this column + 2 blocks
-    t7 += @elapsed hotloop!(H, Hj, Hr, y, j, j + bs + bz, n, m, n) # expensive
+    t7 += @elapsed hotloop!(H, Hj, Hr, y, j:m, (j + bs + bz):n) # expensive
 
     # Now receive next iterations Hj
     t8 += @elapsed if j + bs <= n
