@@ -198,10 +198,8 @@ function hotloop!(H::AbstractMatrix, work)
     coeffs[j, j] = 1 # Column j contributes to itself
     # Each subsequent column i contributes based on previous contributions
     for i in j + 1:size(coeffs, 1)
-      coeffs[i, j] -= dots[i, j] # Direct contribution from column i to column j
-      # Add indirect contributions: column i affects j through intermediate columns
-      for k in j + 1:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
-      #ks = (j + 1):(i - 1)
+      for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
+      #ks = j:(i - 1)
       #if !isempty(ks)
       #  mul!(view(coeffs, i:i, j:j), view(dots, i:i, ks), view(coeffs, ks, j), -1, true)
       #end
