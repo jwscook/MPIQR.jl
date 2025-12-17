@@ -185,7 +185,6 @@ function hotloop!(H::AbstractMatrix, work)
   @assert size(work.Hj, 2) == size(work.y, 2)
   mul!(dots, Hj', Hj, true, false)
   mul!(y, H', Hj, true, false)
-  dots = Matrix(dots) # no-op/low-cost-op if already on the CPU
 
   # Collect all coefficients into a matrix using direct recurrence
   # coeffs[i, j] represents how much Hj' Hj contributes to H.
@@ -198,11 +197,11 @@ function hotloop!(H::AbstractMatrix, work)
     coeffs[j, j] = 1 # Column j contributes to itself
     # Each subsequent column i contributes based on previous contributions
     for i in j + 1:size(coeffs, 1)
-      for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
-      #ks = j:(i - 1)
-      #if !isempty(ks)
-      #  mul!(view(coeffs, i:i, j:j), view(dots, i:i, ks), view(coeffs, ks, j), -1, true)
-      #end
+      #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
+      ks = j:(i - 1)
+      if !isempty(ks)
+        mul!(view(coeffs, i:i, j:j), view(dots, i:i, ks), view(coeffs, ks, j), -1, true)
+      end
     end
   end
   y' .= (coeffs * y') # these matrices are small
@@ -231,6 +230,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=src)
 
   mpibuffer = similar(H.localmatrix, m * bs)
+  reqs = Vector{MPI.Request}()
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
     bs = min(bs, n - j + 1)
@@ -266,7 +266,6 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
       # make mpibuffer the right linear length so that it accommodate all the new Hj
       resize!(mpibuffer, (m - (j - 1 + bs)) * bz)
       src = columnowner(H, j + bs)
-      reqs = Vector{MPI.Request}()
       if H.rank == src
         @inbounds mpibuffer .= reshape(view(H, j+bs:m, j+bs:j-1+bs+bz), length(mpibuffer))
         for r in filter(!=(src), 0:H.commsize-1)
@@ -282,9 +281,10 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
 
     # Now receive next iterations Hj
     t8 += @elapsed if j + bs <= n
-      MPI.Waitall(reqs)
       viewHj = view(work.Hj, j+bs:m, 1:bz)
       linearviewHj = reshape(viewHj, length(mpibuffer))
+      MPI.Waitall(reqs)
+      empty!(reqs)
       copyto!(linearviewHj, mpibuffer) # mutates Hj
     end
     next!(progress)
