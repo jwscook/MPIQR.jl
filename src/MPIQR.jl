@@ -134,17 +134,17 @@ function Base.intersect(A::MPIQRMatrix, cols)
   indexz = searchsortedlast(A.localcolumns, last(cols))
   return ColumnIntersectionIterator(A.localcolumns, indexa:indexz)
 end
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, jm, js)
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, z, jm, js)
   ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
   ll = length(ljaz)
-  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, 1:ll, :))
+  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, 1:ll, :), view(z, :, 1:ll))
 end
 
 function hotloop!(H::MPIQRMatrix, work, jm, jaz)
   js = intersect(H, jaz)
   isempty(js) && return nothing
-  viewH, viewHj, viewy = hotloopviews(H, work.Hj, work.y, jm, js)
-  hotloop!(viewH, (Hj=viewHj, y=viewy, dots=work.dots, coeffs=work.coeffs))
+  viewH, viewHj, viewy, viewz = hotloopviews(H, work.Hj, work.y, work.z, jm, js)
+  hotloop!(viewH, (Hj=viewHj, y=viewy, z=viewz, dots=work.dots, coeffs=work.coeffs))
   return nothing
 end
 
@@ -178,11 +178,13 @@ that when multiplied together give the effective recursive action of Hj on H.
 ```
 """
 function hotloop!(H::AbstractMatrix, work)
-  Hj, y, dots, coeffs = work.Hj, work.y, work.dots, work.coeffs
+  Hjj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
+  Hj = deepcopy(Hjj)
 
   @assert size(H, 1) == size(work.Hj, 1)
   @assert size(H, 2) == size(work.y, 1)
   @assert size(work.Hj, 2) == size(work.y, 2)
+  @assert size(z) == reverse(size(y))
   mul!(dots, Hj', Hj, true, false)
   mul!(y, H', Hj, true, false)
 
@@ -204,8 +206,9 @@ function hotloop!(H::AbstractMatrix, work)
       end
     end
   end
-  y' .= (coeffs * y') # these matrices are small
-  mul!(H, work.Hj, work.y', -1, true) # H .-= Hj * y'
+
+  mul!(z, coeffs, y')
+  mul!(H, Hj, z, -1, true) # H .-= Hj * y'
   return nothing
 end
 
@@ -217,14 +220,16 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   t1 = t2 = t3 = t4 = t5 = t6 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
+          Hb = similar(H.localmatrix, m, bs),
           y = similar(H.localmatrix, localcolsize(H, 1:n), bs),
+          z = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           dots = similar(H.localmatrix, bs, bs),
           coeffs = similar(H.localmatrix, bs, bs))
-
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
     bz = min(bs, n - j + 1)
 
+    # process all the first bz column(s) of H
     # process all the first bz column(s) of H
     if H.rank == colowner
       copyto!(work.Hj, view(H, :, j:j + bz - 1))
@@ -237,11 +242,22 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
           view(work.Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
           view(work.Hj, j + Δj:m, 1 + Δj) .*= f
         end
-        t3 += @elapsed hotloop!(view(work.Hj, j+Δj:m, 1 + Δj:bz),
-                                (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
-                                 y=view(work.y,  1+Δj:bz),
-                                 dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                                 coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
+        t3 += @elapsed begin
+          # Copy trailing columns to separate buffer to avoid aliasing
+          trailing_cols = view(work.Hj, j+Δj:m, 1 + Δj:bz)
+          trailing_work = view(work.Hb, 1:size(trailing_cols, 1), 1:size(trailing_cols, 2))
+          copyto!(trailing_work, trailing_cols)
+          
+          hotloop!(trailing_work,
+                   (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
+                    y=view(work.y, 1+Δj:bz, 1:1),
+                    z=view(work.z, 1:1, 1+Δj:bz),
+                    dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
+                    coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
+          
+          # Copy result back
+          copyto!(trailing_cols, trailing_work)
+        end
         t4 += @elapsed copyto!(view(H, j + Δj:m, j + Δj:j-1+bz), view(work.Hj, j + Δj:m, 1 + Δj:bz))
       end
     end
