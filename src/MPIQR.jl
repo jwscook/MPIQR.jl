@@ -214,83 +214,47 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  t1 = t2 = t3 = t4 = t5 = t6 = t7 = t8 = 0.0
+  t1 = t2 = t3 = t4 = t5 = t6 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
           y = similar(H.localmatrix, localcolsize(H, 1:n), bs),
           dots = similar(H.localmatrix, bs, bs),
           coeffs = similar(H.localmatrix, bs, bs))
 
-  # send the first column(s) of H to Hj on all ranks
-  j = 1
-  src = columnowner(H, j)
-  if H.rank == src
-    @views copyto!(work.Hj[j:m, :], H[j:m, j:j - 1 + bs])
-  end
-  MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=src)
-
-  mpibuffer = similar(H.localmatrix, m * bs)
-  reqs = Vector{MPI.Request}()
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
-    bs = min(bs, n - j + 1)
-    bz = min(bs, n - j - bs + 1)
+    bz = min(bs, n - j + 1)
 
-    # process all the first bs column(s) of H
-    @inbounds for Δj in 0:bs-1
-      t1 += @elapsed s = norm(view(work.Hj, j + Δj:m, 1 + Δj)) # expensive
-      t2 += @elapsed begin
-        view(α, j + Δj) .= s .* alphafactor.(view(work.Hj, j + Δj, 1 + Δj))
-        f = 1 ./ sqrt.(s .* (s .+ abs.(view(work.Hj, j + Δj, 1 + Δj))))
-        view(work.Hj, j:j + Δj - 1, 1 + Δj) .= 0
-        view(work.Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
-        view(work.Hj, j + Δj:m, 1 + Δj) .*= f
-      end
-
-      t3 += @elapsed hotloop!(view(work.Hj, j+Δj:m, 1 + Δj:bs),
-                              (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
-                               y=view(work.y,  1+Δj:bs),
-                               dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                               coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
-
-      t4 += @elapsed if H.rank == colowner
-        copyto!(view(H, j + Δj:m, j + Δj:j-1+bs), view(work.Hj, j + Δj:m, 1 + Δj:bs))
+    # process all the first bz column(s) of H
+    if H.rank == colowner
+      copyto!(work.Hj, view(H, :, j:j + bz - 1))
+      @inbounds for Δj in 0:bz-1
+        t1 += @elapsed s = norm(view(work.Hj, j + Δj:m, 1 + Δj)) # expensive
+        t2 += @elapsed begin
+          view(α, j + Δj) .= s .* alphafactor.(view(work.Hj, j + Δj, 1 + Δj))
+          f = 1 ./ sqrt.(s .* (s .+ abs.(view(work.Hj, j + Δj, 1 + Δj))))
+          view(work.Hj, j:j + Δj - 1, 1 + Δj) .= 0
+          view(work.Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
+          view(work.Hj, j + Δj:m, 1 + Δj) .*= f
+        end
+        t3 += @elapsed hotloop!(view(work.Hj, j+Δj:m, 1 + Δj:bz),
+                                (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
+                                 y=view(work.y,  1+Δj:bz),
+                                 dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
+                                 coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
+        t4 += @elapsed copyto!(view(H, j + Δj:m, j + Δj:j-1+bz), view(work.Hj, j + Δj:m, 1 + Δj:bz))
       end
     end
+    t5 += @elapsed MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=colowner)
 
     # now do the next blocksize of colums to ready it for the next iteration
-    t5 += @elapsed hotloop!(H, work, j:m, (j + bs):(j - 1 + bs + bz))
+    t6 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
 
-    # if it's not the last iteration send the next iterations Hj to all ranks
-    t6 += @elapsed if j + bs <= n
-      # make mpibuffer the right linear length so that it accommodate all the new Hj
-      resize!(mpibuffer, (m - (j - 1 + bs)) * bz)
-      src = columnowner(H, j + bs)
-      if H.rank == src
-        @inbounds mpibuffer .= reshape(view(H, j+bs:m, j+bs:j-1+bs+bz), length(mpibuffer))
-        for r in filter(!=(src), 0:H.commsize-1)
-          push!(reqs, MPI.Isend(mpibuffer, H.comm; dest=r, tag=j + bs))
-        end
-      else
-        push!(reqs, MPI.Irecv!(mpibuffer, H.comm; source=src, tag=j + bs))
-      end
-    end
-
-    # Apply Hj to all the columns of H to the right of this column + 2 blocks
-    t7 += @elapsed hotloop!(H, work, j:m, (j + bs + bz):n) # expensive
-
-    # Now receive next iterations Hj
-    t8 += @elapsed if j + bs <= n
-      viewHj = view(work.Hj, j+bs:m, 1:bz)
-      linearviewHj = reshape(viewHj, length(mpibuffer))
-      MPI.Waitall(reqs)
-      empty!(reqs)
-      copyto!(linearviewHj, mpibuffer) # mutates Hj
-    end
     next!(progress)
   end
-  ts = (t1, t2, t3, t4, t5, t6, t7, t8)
+  ts = (t1, t2, t3, t4, t5, t6)
   verbose && println(sum(ts), "s: %s ", trunc.(100 .* ts ./ sum(ts), sigdigits=3))
+  MPI.Allreduce!(α, +, H.comm)
   return MPIQRStruct(H, α)
 end
 
