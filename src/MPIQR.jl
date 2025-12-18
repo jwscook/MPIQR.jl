@@ -247,7 +247,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
     end
     t5 += @elapsed MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=colowner)
 
-    # now do the next blocksize of colums to ready it for the next iteration
+    # now do the rest of the columns from j + bz to the right
     t6 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
 
     next!(progress)
