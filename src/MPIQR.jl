@@ -249,11 +249,11 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
           copyto!(trailing_work, trailing_cols)
           
           hotloop!(trailing_work,
-                   (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
-                    y=view(work.y, 1+Δj:bz, 1:1),
-                    z=view(work.z, 1:1, 1+Δj:bz),
-                    dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                    coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
+                   (Hj = view(work.Hj, j+Δj:m, 1 + Δj),
+                    y = view(work.y, 1+Δj:bz, 1:1),
+                    z = view(work.z, 1:1, 1+Δj:bz),
+                    dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
+                    coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
           
           # Copy result back
           copyto!(trailing_cols, trailing_work)
