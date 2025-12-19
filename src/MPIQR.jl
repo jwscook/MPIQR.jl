@@ -217,10 +217,9 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  t1 = t2 = t3 = t4 = t5 = t6 = 0.0
+  t1 = t2 = t3 = t4 = t5 = t6 = t7 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
-          Hb = similar(H.localmatrix, m, bs),
           y = similar(H.localmatrix, localcolsize(H, 1:n), bs),
           z = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           dots = similar(H.localmatrix, bs, bs),
@@ -232,43 +231,32 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
     # process all the first bz column(s) of H
     # process all the first bz column(s) of H
     if H.rank == colowner
-      copyto!(work.Hj, view(H, :, j:j + bz - 1))
+      fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
       @inbounds for Δj in 0:bz-1
-        t1 += @elapsed s = norm(view(work.Hj, j + Δj:m, 1 + Δj)) # expensive
-        t2 += @elapsed begin
-          view(α, j + Δj) .= s .* alphafactor.(view(work.Hj, j + Δj, 1 + Δj))
-          f = 1 ./ sqrt.(s .* (s .+ abs.(view(work.Hj, j + Δj, 1 + Δj))))
-          view(work.Hj, j:j + Δj - 1, 1 + Δj) .= 0
-          view(work.Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
-          view(work.Hj, j + Δj:m, 1 + Δj) .*= f
-        end
-        t3 += @elapsed begin
-          # Copy trailing columns to separate buffer to avoid aliasing
-          trailing_cols = view(work.Hj, j+Δj:m, 1 + Δj:bz)
-          trailing_work = view(work.Hb, 1:size(trailing_cols, 1), 1:size(trailing_cols, 2))
-          copyto!(trailing_work, trailing_cols)
-          
-          hotloop!(trailing_work,
-                   (Hj = view(work.Hj, j+Δj:m, 1 + Δj),
-                    y = view(work.y, 1+Δj:bz, 1:1),
-                    z = view(work.z, 1:1, 1+Δj:bz),
-                    dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                    coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
-          
-          # Copy result back
-          copyto!(trailing_cols, trailing_work)
-        end
-        t4 += @elapsed copyto!(view(H, j + Δj:m, j + Δj:j-1+bz), view(work.Hj, j + Δj:m, 1 + Δj:bz))
+        v = view(H, j+Δj:m, j + Δj)
+        t1 += @elapsed s = norm(v) # expensive
+        t2 += @elapsed view(α, j + Δj) .= s .* alphafactor.(view(v, 1))
+        t2 += @elapsed f = 1 ./ sqrt.(s .* (s .+ abs.(view(v, 1))))
+        t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
+        t3 += @elapsed v .*= f
+        # Copy trailing columns to separate buffer to avoid aliasing
+        t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
+        t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
+                                (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
+                                 y = view(work.y, 1+Δj:bz, 1:1),
+                                 z = view(work.z, 1:1, 1+Δj:bz),
+                                 dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
+                                 coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
       end
     end
-    t5 += @elapsed MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=colowner)
+    t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner)
 
     # now do the rest of the columns from j + bz to the right
-    t6 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
+    t7 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
 
     next!(progress)
   end
-  ts = (t1, t2, t3, t4, t5, t6)
+  ts = (t1, t2, t3, t4, t5, t6, t7)
   verbose && println(sum(ts), "s: %s ", trunc.(100 .* ts ./ sum(ts), sigdigits=3))
   MPI.Allreduce!(α, +, H.comm)
   return MPIQRStruct(H, α)
