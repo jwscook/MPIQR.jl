@@ -194,10 +194,10 @@ function hotloop!(H::AbstractMatrix, work)
 
   # Build coefficients column by column using recurrence relation
   # For each target column j, compute contributions from columns j+1:end
-  @inbounds for j in 1:size(coeffs, 2)
+  @inbounds for j in axes(coeffs, 2)
     view(coeffs, j, j) .= 1 # Column j contributes to itself
     # Each subsequent column i contributes based on previous contributions
-    for i in j + 1:size(coeffs, 1)
+    for i in 1 + 1:size(coeffs, 1)
       #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
       ks = j:(i - 1)
       if !isempty(ks)
@@ -350,7 +350,7 @@ function LinearAlgebra.ldiv!(x::AbstractVecOrMat, H::MPIQRStruct, b::AbstractVec
     progress=FakeProgress(), verbose=false)
   c = deepcopy(b) # TODO: make this ...
   solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
-  x .= view(c, 1:size(x, 1), :) # .. and there this better
+  x .= view(c, axes(x, 1), :) # .. and there this better
   return x
 end
 
