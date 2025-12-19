@@ -137,7 +137,7 @@ end
 function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, z, jm, js)
   ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
   ll = length(ljaz)
-  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, 1:ll, :), view(z, :, 1:ll))
+  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, :, 1:ll), view(z, :, 1:ll))
 end
 
 function hotloop!(H::MPIQRMatrix, work, jm, jaz)
@@ -178,15 +178,14 @@ that when multiplied together give the effective recursive action of Hj on H.
 ```
 """
 function hotloop!(H::AbstractMatrix, work)
-  Hjj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
-  Hj = deepcopy(Hjj)
+  Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
 
   @assert size(H, 1) == size(work.Hj, 1)
-  @assert size(H, 2) == size(work.y, 1)
-  @assert size(work.Hj, 2) == size(work.y, 2)
-  @assert size(z) == reverse(size(y))
-  mul!(dots, Hj', Hj, true, false)
-  mul!(y, H', Hj, true, false)
+  @assert size(H, 2) == size(work.y, 2)
+  @assert size(work.Hj, 2) == size(work.y, 1)
+  @assert size(z) == size(y)
+  mul!(dots, Hj', Hj)
+  mul!(y, Hj', H)
 
   # Collect all coefficients into a matrix using direct recurrence
   # coeffs[i, j] represents how much Hj' Hj contributes to H.
@@ -196,7 +195,7 @@ function hotloop!(H::AbstractMatrix, work)
   # Build coefficients column by column using recurrence relation
   # For each target column j, compute contributions from columns j+1:end
   @inbounds for j in 1:size(coeffs, 2)
-    coeffs[j, j] = 1 # Column j contributes to itself
+    view(coeffs, j, j) .= 1 # Column j contributes to itself
     # Each subsequent column i contributes based on previous contributions
     for i in j + 1:size(coeffs, 1)
       #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
@@ -207,8 +206,8 @@ function hotloop!(H::AbstractMatrix, work)
     end
   end
 
-  mul!(z, coeffs, y')
-  mul!(H, Hj, z, -1, true) # H .-= Hj * y'
+  mul!(z, coeffs, y) # z = coeffs * y
+  mul!(H, Hj, z, -1, true) # H .-= Hj * z
   return nothing
 end
 
@@ -220,7 +219,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   t1 = t2 = t3 = t4 = t5 = t6 = t7 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
-          y = similar(H.localmatrix, localcolsize(H, 1:n), bs),
+          y = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           z = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           dots = similar(H.localmatrix, bs, bs),
           coeffs = similar(H.localmatrix, bs, bs))
@@ -243,7 +242,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
         t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
         t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
                                 (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
-                                 y = view(work.y, 1+Δj:bz, 1:1),
+                                 y = view(work.y, 1:1, 1+Δj:bz),
                                  z = view(work.z, 1:1, 1+Δj:bz),
                                  dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
                                  coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
