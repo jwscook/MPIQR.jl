@@ -134,17 +134,17 @@ function Base.intersect(A::MPIQRMatrix, cols)
   indexz = searchsortedlast(A.localcolumns, last(cols))
   return ColumnIntersectionIterator(A.localcolumns, indexa:indexz)
 end
-function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, jm, js)
+function hotloopviews(H::MPIQRMatrix, Hj::AbstractMatrix, y, z, jm, js)
   ljaz = localcolindex(H, first(js)):localcolindex(H, last(js))
   ll = length(ljaz)
-  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, 1:ll, :))
+  return (view(H.localmatrix, jm, ljaz), view(Hj, jm, :), view(y, :, 1:ll), view(z, :, 1:ll))
 end
 
 function hotloop!(H::MPIQRMatrix, work, jm, jaz)
   js = intersect(H, jaz)
   isempty(js) && return nothing
-  viewH, viewHj, viewy = hotloopviews(H, work.Hj, work.y, jm, js)
-  hotloop!(viewH, (Hj=viewHj, y=viewy, dots=work.dots, coeffs=work.coeffs))
+  viewH, viewHj, viewy, viewz = hotloopviews(H, work.Hj, work.y, work.z, jm, js)
+  hotloop!(viewH, (Hj=viewHj, y=viewy, z=viewz, dots=work.dots, coeffs=work.coeffs))
   return nothing
 end
 
@@ -178,13 +178,14 @@ that when multiplied together give the effective recursive action of Hj on H.
 ```
 """
 function hotloop!(H::AbstractMatrix, work)
-  Hj, y, dots, coeffs = work.Hj, work.y, work.dots, work.coeffs
+  Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
 
   @assert size(H, 1) == size(work.Hj, 1)
-  @assert size(H, 2) == size(work.y, 1)
-  @assert size(work.Hj, 2) == size(work.y, 2)
-  mul!(dots, Hj', Hj, true, false)
-  mul!(y, H', Hj, true, false)
+  @assert size(H, 2) == size(work.y, 2)
+  @assert size(work.Hj, 2) == size(work.y, 1)
+  @assert size(z) == size(y)
+  mul!(dots, Hj', Hj)
+  mul!(y, Hj', H)
 
   # Collect all coefficients into a matrix using direct recurrence
   # coeffs[i, j] represents how much Hj' Hj contributes to H.
@@ -193,10 +194,10 @@ function hotloop!(H::AbstractMatrix, work)
 
   # Build coefficients column by column using recurrence relation
   # For each target column j, compute contributions from columns j+1:end
-  @inbounds for j in 1:size(coeffs, 2)
-    coeffs[j, j] = 1 # Column j contributes to itself
+  @inbounds for j in axes(coeffs, 2)
+    view(coeffs, j, j) .= 1 # Column j contributes to itself
     # Each subsequent column i contributes based on previous contributions
-    for i in j + 1:size(coeffs, 1)
+    for i in 1 + 1:size(coeffs, 1)
       #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
       ks = j:(i - 1)
       if !isempty(ks)
@@ -204,8 +205,9 @@ function hotloop!(H::AbstractMatrix, work)
       end
     end
   end
-  y' .= (coeffs * y') # these matrices are small
-  mul!(H, work.Hj, work.y', -1, true) # H .-= Hj * y'
+
+  mul!(z, coeffs, y) # z = coeffs * y
+  mul!(H, Hj, z, -1, true) # H .-= Hj * z
   return nothing
 end
 
@@ -214,45 +216,42 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  t1 = t2 = t3 = t4 = t5 = t6 = 0.0
+  t1 = t2 = t3 = t4 = t5 = t6 = t7 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
-          y = similar(H.localmatrix, localcolsize(H, 1:n), bs),
+          y = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
+          z = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           dots = similar(H.localmatrix, bs, bs),
           coeffs = similar(H.localmatrix, bs, bs))
-
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
     bz = min(bs, n - j + 1)
-
     # process all the first bz column(s) of H
     if H.rank == colowner
-      copyto!(work.Hj, view(H, :, j:j + bz - 1))
+      fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
       @inbounds for Δj in 0:bz-1
-        t1 += @elapsed s = norm(view(work.Hj, j + Δj:m, 1 + Δj)) # expensive
-        t2 += @elapsed begin
-          view(α, j + Δj) .= s .* alphafactor.(view(work.Hj, j + Δj, 1 + Δj))
-          f = 1 ./ sqrt.(s .* (s .+ abs.(view(work.Hj, j + Δj, 1 + Δj))))
-          view(work.Hj, j:j + Δj - 1, 1 + Δj) .= 0
-          view(work.Hj, j + Δj, 1 + Δj) .-= view(α, j + Δj)
-          view(work.Hj, j + Δj:m, 1 + Δj) .*= f
-        end
-        t3 += @elapsed hotloop!(view(work.Hj, j+Δj:m, 1 + Δj:bz),
-                                (Hj=view(work.Hj, j+Δj:m, 1 + Δj),
-                                 y=view(work.y,  1+Δj:bz),
-                                 dots=view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                                 coeffs=view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
-        t4 += @elapsed copyto!(view(H, j + Δj:m, j + Δj:j-1+bz), view(work.Hj, j + Δj:m, 1 + Δj:bz))
+        v = view(H, j+Δj:m, j + Δj)
+        t1 += @elapsed s = norm(v) # expensive
+        t2 += @elapsed view(α, j + Δj) .= s .* alphafactor.(view(v, 1))
+        t2 += @elapsed f = 1 ./ sqrt.(s .* (s .+ abs.(view(v, 1))))
+        t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
+        t3 += @elapsed v .*= f
+        # Copy trailing columns to separate buffer to avoid aliasing
+        t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
+        t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
+                                (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
+                                 y = view(work.y, 1:1, 1+Δj:bz),
+                                 z = view(work.z, 1:1, 1+Δj:bz),
+                                 dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
+                                 coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
       end
     end
-    t5 += @elapsed MPI.Bcast!(view(work.Hj, j:m, :), H.comm; root=colowner)
-
+    t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner) # blocking
     # now do the rest of the columns from j + bz to the right
-    t6 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
-
+    t7 += @elapsed hotloop!(H, work, j:m, (j + bz):n) # expensive
     next!(progress)
   end
-  ts = (t1, t2, t3, t4, t5, t6)
+  ts = (t1, t2, t3, t4, t5, t6, t7)
   verbose && println(sum(ts), "s: %s ", trunc.(100 .* ts ./ sum(ts), sigdigits=3))
   MPI.Allreduce!(α, +, H.comm)
   return MPIQRStruct(H, α)
@@ -347,7 +346,7 @@ function LinearAlgebra.ldiv!(x::AbstractVecOrMat, H::MPIQRStruct, b::AbstractVec
     progress=FakeProgress(), verbose=false)
   c = deepcopy(b) # TODO: make this ...
   solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
-  x .= view(c, 1:size(x, 1), :) # .. and there this better
+  x .= view(c, axes(x, 1), :) # .. and there this better
   return x
 end
 
