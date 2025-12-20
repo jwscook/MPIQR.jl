@@ -226,8 +226,6 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
     bz = min(bs, n - j + 1)
-
-    # process all the first bz column(s) of H
     # process all the first bz column(s) of H
     if H.rank == colowner
       fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
@@ -248,11 +246,9 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
                                  coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
       end
     end
-    t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner)
-
+    t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner) # blocking
     # now do the rest of the columns from j + bz to the right
-    t7 += @elapsed hotloop!(H, work, j:m, (j + bz):n)
-
+    t7 += @elapsed hotloop!(H, work, j:m, (j + bz):n) # expensive
     next!(progress)
   end
   ts = (t1, t2, t3, t4, t5, t6, t7)
