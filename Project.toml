@@ -10,9 +10,15 @@ MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MPIClusterManagers = "e7922434-ae4b-11e9-05c5-9780451d2c66"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
 
+[extensions]
+MPIQRCUDAExt = "CUDA"
+
 [extras]
 MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
 
 [test]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
