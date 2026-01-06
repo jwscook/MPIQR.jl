@@ -78,8 +78,17 @@ end
 
 Base.size(A::MPIQRMatrix) = A.globalsize
 Base.size(A::MPIQRMatrix, i::Integer) = A.globalsize[i]
-Base.getindex(A::MPIQRMatrix, i, j) = A.localmatrix[i, localcolindex(A, j)]
-Base.view(A::MPIQRMatrix, i, j) = view(A.localmatrix, i, localcolindex(A, j)) # helps out GPUs
+Base.getindex(A::MPIQRMatrix, i, j::Integer) = A.localmatrix[i, localcolindex(A, j)]
+function Base.getindex(A::MPIQRMatrix, i, j)
+  a, z = localcolindex(A, first(j)), localcolindex(A, last(j))
+  return length(j) == length(a:z) ? A.localmatrix[i, a:z] : A.localmatrix[i, localcolindex(A, j)]
+end
+Base.view(A::MPIQRMatrix, i, j::Integer) = view(A.localmatrix, i, localcolindex(A, j)) # helps out GPUs
+function Base.view(A::MPIQRMatrix, i, j)
+  @assert length(j) == last(j) - first(j) + 1
+  a, z = localcolindex(A, first(j)), localcolindex(A, last(j))
+  return view(A.localmatrix, i, a:z) # helps out GPUs
+end
 
 function Base.setindex!(A::MPIQRMatrix, v, i, j)
   return A.localmatrix[i, localcolindex(A, j)] = v
@@ -178,35 +187,40 @@ that when multiplied together give the effective recursive action of Hj on H.
 ```
 """
 function hotloop!(H::AbstractMatrix, work)
-  Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
-
   @assert size(H, 1) == size(work.Hj, 1)
   @assert size(H, 2) == size(work.y, 2)
   @assert size(work.Hj, 2) == size(work.y, 1)
-  @assert size(z) == size(y)
-  mul!(dots, Hj', Hj)
+  @assert size(work.z) == size(work.y)
+  @assert size(work.dots) == size(work.coeffs)
+  Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
+
   mul!(y, Hj', H)
 
-  # Collect all coefficients into a matrix using direct recurrence
-  # coeffs[i, j] represents how much Hj' Hj contributes to H.
-  # Starting with identity (each column contributes to itself)
-  fill!(coeffs, 0)
+  if size(coeffs, 1) == 1
+    copyto!(z, y)
+  else
+    mul!(dots, Hj', Hj)
+    # Collect all coefficients into a matrix using direct recurrence
+    # coeffs[i, j] represents how much Hj' Hj contributes to H.
+    # Starting with identity (each column contributes to itself)
+    fill!(coeffs, 0)
 
-  # Build coefficients column by column using recurrence relation
-  # For each target column j, compute contributions from columns j+1:end
-  @inbounds for j in axes(coeffs, 2)
-    view(coeffs, j, j) .= 1 # Column j contributes to itself
-    # Each subsequent column i contributes based on previous contributions
-    for i in 1 + 1:size(coeffs, 1)
-      #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
-      ks = j:(i - 1)
-      if !isempty(ks)
-        mul!(view(coeffs, i:i, j:j), view(dots, i:i, ks), view(coeffs, ks, j), -1, true)
+    # Build coefficients column by column using recurrence relation
+    # For each target column j, compute contributions from columns j+1:end
+    @inbounds for j in axes(coeffs, 2)
+      view(coeffs, j, j) .= 1 # Column j contributes to itself
+      # Each subsequent column i contributes based on previous contributions
+      for i in 2:size(coeffs, 1)
+        #for k in j:i - 1; coeffs[i, j] -= dots[i, k] * coeffs[k, j]; end
+        ks = j:(i - 1)
+        if !isempty(ks)
+          mul!(view(coeffs, i:i, j:j), view(dots, i:i, ks), view(coeffs, ks, j), -1, true)
+        end
       end
     end
+    mul!(z, coeffs, y) # z = coeffs * y
   end
 
-  mul!(z, coeffs, y) # z = coeffs * y
   mul!(H, Hj, z, -1, true) # H .-= Hj * z
   return nothing
 end
@@ -231,7 +245,7 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
       fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
       @inbounds for Δj in 0:bz-1
         v = view(H, j+Δj:m, j + Δj)
-        t1 += @elapsed s = norm(v) # expensive
+        t1 += @elapsed s = sqrt.(sum(abs2, v; dims=1)) # norm(v) # expensive
         t2 += @elapsed view(α, j + Δj) .= s .* alphafactor.(view(v, 1))
         t2 += @elapsed f = 1 ./ sqrt.(s .* (s .+ abs.(view(v, 1))))
         t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
