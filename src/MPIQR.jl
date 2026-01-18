@@ -191,12 +191,11 @@ function hotloop!(H::AbstractMatrix, work)
   @assert size(H, 2) == size(work.y, 2)
   @assert size(work.Hj, 2) == size(work.y, 1)
   @assert size(work.z) == size(work.y)
-  @assert size(work.dots) == size(work.coeffs)
   Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
 
   mul!(y, Hj', H)
 
-  if size(coeffs, 1) == 1
+  if size(Hj, 2) == 1
     copyto!(z, y)
   else
     mul!(dots, Hj', Hj)
@@ -245,10 +244,9 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
         t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
         t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
                                 (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
-                                 y = view(work.y, 1:1, 1+Δj:bz),
-                                 z = view(work.z, 1:1, 1+Δj:bz),
-                                 dots = view(work.dots, 1:1, 1:1), # indexing 1:1 dispatches to BLAS
-                                 coeffs = view(work.coeffs, 1:1, 1:1))) # indexing 1:1 dispatches to BLAS
+                                 y = view(work.dots, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
+                                 z = view(work.coeffs, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
+                                 dots = nothing, coeffs = nothing)) # not needed
       end
     end
     t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner) # blocking
