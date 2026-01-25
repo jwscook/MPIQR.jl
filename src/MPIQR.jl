@@ -193,11 +193,11 @@ function hotloop!(H::AbstractMatrix, work)
   @assert size(work.z) == size(work.y)
   Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
 
+  isone(size(Hj, 2)) && (z = y) # avoid aliasing in final mul! of if statement
+
   mul!(y, Hj', H)
 
-  if size(Hj, 2) == 1
-    copyto!(z, y)
-  else
+  if !isone(size(Hj, 2))
     mul!(dots, Hj', Hj)
     # Collect all coefficients into a matrix using direct recurrence
     # coeffs[i, j] represents how much Hj' Hj contributes to H.
