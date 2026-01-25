@@ -194,12 +194,11 @@ function hotloop!(H::AbstractMatrix, work)
   @assert size(H, 2) == size(work.z, 2)
   Hj, y, z, dots, coeffs = work.Hj, work.y, work.z, work.dots, work.coeffs
 
+  isone(size(Hj, 2)) && (z = y) # avoid aliasing in final mul! of if statement
+
   t1 = @elapsed mul!(y, Hj', H) # expensive
 
-  (t2, t3, t4, t5) = if size(Hj, 2) == 1
-    t3 = @elapsed copyto!(z, y)
-    (0.0, t3, 0.0, 0.0)
-  else
+  (t2, t3, t4, t5) = if !isone(size(Hj, 2))
     t2 = @elapsed mul!(dots, Hj', Hj)
     # Collect all coefficients into a matrix using direct recurrence
     # coeffs[i, j] represents how much Hj' Hj contributes to H.
@@ -211,6 +210,8 @@ function hotloop!(H::AbstractMatrix, work)
     t4 = @elapsed ldiv!(coeffs, UnitLowerTriangular(dots), I(size(coeffs, 1)))
     t5 = @elapsed mul!(z, coeffs, y) # z = coeffs * y
     (t2, t3, t4, t5)
+  else
+    (0.0, 0.0, 0.0, 0.0)
   end
   t6 = @elapsed mul!(H, Hj, z, -1, true) # H .-= Hj * z # expensive
   return (t1, t2, t3, t4, t5, t6)
@@ -247,12 +248,14 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
     if H.rank == colowner
       fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
       @inbounds for Δj in 0:bz-1
-        v = view(H, j+Δj:m, j + Δj)
+        v = view(H, j+Δj:m, j+Δj:j+Δj)
+        #@show typeof(v)
         t1 += @elapsed normandscale!(v, α, j + Δj) # expensive
         # Copy trailing columns to separate buffer to avoid aliasing
-        t2 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
+        viewHj = view(work.Hj, j+Δj:m, 1+Δj:1+Δj)
+        t2 += @elapsed copyto!(viewHj, v) # can't have H on both sides of mul!
         t3 += @elapsed th .+= hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
-                                (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
+                                (Hj = viewHj, # copy of v
                                  y = view(work.smally, :, 1+Δj:bz),
                                  z = view(work.smallz, :, 1+Δj:bz),
                                  dots = nothing, # not needed
