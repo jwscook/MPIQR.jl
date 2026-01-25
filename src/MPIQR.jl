@@ -241,9 +241,9 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
         t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
         t3 += @elapsed v .*= f
         # Copy trailing columns to separate buffer to avoid aliasing
-        t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1 + Δj), v) # can't have H on both sides of mul!
+        t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1+Δj:1+Δj), v) # can't have H on both sides of mul!
         t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
-                                (Hj = view(work.Hj, j+Δj:m, 1 + Δj), # copy of v
+                                (Hj = view(work.Hj, j+Δj:m, 1+Δj:1+Δj), # copy of v
                                  y = view(work.dots, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
                                  z = view(work.coeffs, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
                                  dots = nothing, coeffs = nothing)) # not needed
