@@ -65,31 +65,27 @@ function MPIQR.normandscale!(
     v::SubArray{T, 2, CuArray{T, 2, CUDA.DeviceMemory}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false},
     α::CuArray{T, 1, CUDA.DeviceMemory},
     j::Int64) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
-
   m = size(v, 1)
   n = size(v, 2)
   @assert n == 1 "v must be a column vector (n=1)"
 
-  # Get parent array and offsets
   v_parent = parent(v)
   row_offset = first(v.indices[1]) - 1
   col_offset = first(v.indices[2]) - 1
   nrows_parent = size(v_parent, 1)
+  base_offset = col_offset * nrows_parent + row_offset
 
-  # Linear offset for the column in parent array
-  base_offset = (col_offset) * nrows_parent + row_offset
+  # Optimized thread/block configuration
+  threads = min(256, nextpow(2, m))
+  blocks = cld(m, threads * 4)  # Process 4 elements per thread
 
-  threads = 256
-  blocks = cld(m, threads)
   partial = CuArray{Float64}(undef, blocks)
   shmem = threads * sizeof(Float64)
 
-  # 1) blockwise norm^2
   @cuda threads=threads blocks=blocks shmem=shmem norm2_blocks_subarray!(
     v_parent, partial, m, base_offset
   )
 
-  # 2) final reduction + scale
   @cuda threads=threads blocks=1 shmem=shmem finalize_normandscale_subarray!(
     v_parent, α, j, partial, m, base_offset
   )
@@ -97,31 +93,38 @@ function MPIQR.normandscale!(
   return nothing
 end
 
+
 function norm2_blocks_subarray!(v_parent, partial, m, offset)
   tid = threadIdx().x
-  idx = (blockIdx().x - 1) * blockDim().x + tid
+  idx = (blockIdx().x - 1) * blockDim().x * 4 + tid
   shared = @cuDynamicSharedMem(Float64, blockDim().x)
 
+  # Process 4 elements per thread (loop unrolling)
   acc = 0.0
-  if idx <= m
-    @inbounds acc = abs2(v_parent[offset + idx])
+  for i in 0:3
+    @inbounds if idx + i * blockDim().x <= m
+      acc += abs2(v_parent[offset + idx + i * blockDim().x])
+    end
   end
 
   shared[tid] = acc
   sync_threads()
 
-  # Reduction in shared memory
-  stride = blockDim().x >>> 1
-  while stride > 0
-    if tid <= stride
-      shared[tid] += shared[tid + stride]
+  # Optimized reduction: unroll last warp
+  for i in (512, 256, 128)
+    if blockDim().x >= i
+      tid <= i ÷ 2 && (shared[tid] += shared[tid + i ÷ 2])
+      sync_threads()
     end
-    sync_threads()
-    stride >>>= 1
   end
 
-  if tid == 1
-    partial[blockIdx().x] = shared[1]
+  # Final warp reduction (no sync needed)
+  if tid <= 32
+    blockDim().x >= 64 && (shared[tid] += shared[tid + 32])
+    for i in (16, 8, 4, 2)
+      tid <= i && (shared[tid] += shared[tid + i])
+    end
+    tid == 1 && (partial[blockIdx().x] = shared[1] + shared[2])
   end
 
   return nothing
@@ -131,51 +134,52 @@ function finalize_normandscale_subarray!(v_parent, α, j, partial, m, offset)
   tid = threadIdx().x
   shared = @cuDynamicSharedMem(Float64, blockDim().x)
 
-  # Reduce partial sums
+  # Grid-stride loop for partial reduction
   acc = 0.0
   i = tid
-  while i <= length(partial)
-    @inbounds acc += partial[i]
+  len = length(partial)
+  @inbounds while i <= len
+    acc += partial[i]
     i += blockDim().x
   end
-
   shared[tid] = acc
   sync_threads()
 
-  # Final reduction
-  stride = blockDim().x >>> 1
-  while stride > 0
-    if tid <= stride
-      shared[tid] += shared[tid + stride]
+  # Optimized reduction with unrolled warp
+  for i in (512, 256, 128)
+    if blockDim().x >= i
+      tid <= i ÷ 2 && (shared[tid] += shared[tid + i ÷ 2])
+      sync_threads()
     end
-    sync_threads()
-    stride >>>= 1
   end
 
-  # Compute scaling factor and update first element
-  if tid == 1
-    s = sqrt(shared[1])
-    @inbounds v1 = v_parent[offset + 1]
-    αval = s * MPIQR.alphafactor(v1)
-    α[j] = αval
-    @inbounds v_parent[offset + 1] = v1 - αval
-    f = inv(sqrt(s * (s + abs(v1))))
-    shared[1] = f
+  if tid <= 32
+    blockDim().x >= 64 && (shared[tid] += shared[tid + 32])
+    for i in (16, 8, 4, 2)
+      tid <= i && (shared[tid] += shared[tid + i])
+    end
+    if tid == 1
+      s = sqrt(shared[1] + shared[2])
+      @inbounds v1 = v_parent[offset + 1]
+      αval = s * MPIQR.alphafactor(v1)
+      α[j] = αval
+      @inbounds v_parent[offset + 1] = v1 - αval
+      shared[1] = inv(sqrt(s * (s + abs(v1))))
+    end
   end
-
   sync_threads()
+
   f = shared[1]
 
-  # Scale vector
+  # Grid-stride loop with vectorization
   idx = tid
-  while idx <= m
-    @inbounds v_parent[offset + idx] *= f
+  @inbounds while idx <= m
+    v_parent[offset + idx] *= f
     idx += blockDim().x
   end
 
   return nothing
 end
-
 
 function fill_diagonal_kernel!(A, n, value=one(eltype(A)))
   i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -204,28 +208,13 @@ function LinearAlgebra.ldiv!(
 
   return A
 end
+
 function LinearAlgebra.mul!(
     y::CuArray{T, 2, CUDA.DeviceMemory},
-    aHj::Adjoint{T, CuArray{T, 1, CUDA.DeviceMemory}},
+    Hj_adj::Adjoint{T, SubArray{T, 2, CuArray{ComplexF64, 2, CUDA.DeviceMemory}, <:Tuple, false}},
     H::SubArray{T, 2, CuArray{T, 2, CUDA.DeviceMemory}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}
-    ) where T<:Union{ComplexF32, ComplexF64}
-
-  Hj = parent(aHj)
-
-  @assert size(y, 1) == 1
-  @assert size(y, 2) == size(H, 2)
-  @assert size(H, 1) == length(Hj)
-
-  # Reshape y to a vector (view, no copy)
-  y_vec = view(y, 1, :)
-
-  # For complex types: y = Hj' * H
-  # We need: y_vec[j] = sum_i conj(Hj[i]) * H[i,j]
-  # This is: y_vec = H' * conj(Hj) using transpose (not conjugate transpose)
-  # OR equivalently: y_vec = conj(H)' * Hj using conjugate transpose
-  # The simplest is: gemv with 'C' (conjugate transpose) on H
-  CUDA.CUBLAS.gemv!('C', one(T), H, Hj, zero(T), y_vec)
-
+    ) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
+  CUDA.CUBLAS.gemm!('C', 'N', one(T), Hj_adj', H, zero(T), y) # y = Hj' * H
   return y
 end
 
@@ -309,15 +298,6 @@ function LinearAlgebra.mul!(
   CUDA.CUBLAS.gemm!('N', 'N', T(α), Hj, z, T(β), H)
 
   return H
-end
-
-function LinearAlgebra.mul!(
-    y::CuArray{T, 2, CUDA.DeviceMemory},
-    Hj_adj::Adjoint{T, SubArray{T, 2, CuArray{ComplexF64, 2, CUDA.DeviceMemory}, <:Tuple, false}},
-    H::SubArray{T, 2, CuArray{T, 2, CUDA.DeviceMemory}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}
-    ) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
-  CUDA.CUBLAS.gemm!('C', 'N', one(T), Hj_adj', H, zero(T), y) # y = Hj' * H
-  return y
 end
 
 end #module
