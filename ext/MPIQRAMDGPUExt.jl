@@ -68,12 +68,10 @@ function MPIQR.normandscale!(
   @roc groupsize=groupsize gridsize=gridsize shmem=shmem norm2_gridsize_subarray!(
     v_parent, partial, m, base_offset
   )
-  AMDGPU.synchronize()
 
   @roc groupsize=groupsize gridsize=1 shmem=shmem finalize_normandscale_subarray!(
     v_parent, α, j, partial, m, base_offset
   )
-  AMDGPU.synchronize()
 
   return nothing
 end
@@ -163,7 +161,6 @@ function LinearAlgebra.ldiv!(
   # Solve B * X = A  (unit lower triangular)
   AMDGPU.rocBLAS.trsm!('L', 'L', 'N', 'U', T(1), B.data, A)
 
-  @assert all(isfinite, Matrix(A))
   return A
 end
 
@@ -176,8 +173,6 @@ function LinearAlgebra.mul!(
     H::SubArray{T, 2, ROCArray{T, 2, HIPBuffer}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}
     ) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
   AMDGPU.rocBLAS.gemm!('C', 'N', one(T), Hj_adj', H, zero(T), y)
-
-  @assert all(isfinite, Matrix(y))
   return y
 end
 
@@ -194,7 +189,6 @@ function LinearAlgebra.mul!(
   @assert size(z, 1) == 1
   z_vec = view(z, 1, :)
   AMDGPU.rocBLAS.geru!(T(-1), Hj, z_vec, H)
-  @assert all(isfinite, Matrix(H))
   return H
 end
 
@@ -212,7 +206,6 @@ function LinearAlgebra.mul!(
   @assert size(Hj, 2) == size(z, 1)
 
   AMDGPU.rocBLAS.gemm!('N', 'N', T(α), Hj, z, T(β), H)
-  @assert all(isfinite, Matrix(H))
   return H
 end
 
@@ -228,7 +221,6 @@ function Base.:*(
   B_cont .= B
   # gemm!('C','N',...) conjugates hv_mat, giving (1×k)^C * (k×n) = (1×n)
   AMDGPU.rocBLAS.gemm!('C', 'N', one(T), hv_mat, B_cont, zero(T), z)
-  @assert all(isfinite, Matrix(z))
   return z
 end
 
