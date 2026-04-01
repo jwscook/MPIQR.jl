@@ -249,7 +249,6 @@ function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H,
       fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
       @inbounds for Δj in 0:bz-1
         v = view(H, j+Δj:m, j+Δj:j+Δj)
-        #@show typeof(v)
         t1 += @elapsed normandscale!(v, α, j + Δj) # expensive
         # Copy trailing columns to separate buffer to avoid aliasing
         viewHj = view(work.Hj, j+Δj:m, 1+Δj:1+Δj)
