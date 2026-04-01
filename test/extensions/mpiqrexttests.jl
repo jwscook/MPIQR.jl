@@ -1,8 +1,35 @@
-using CUDA
-using MPIQR
 using LinearAlgebra, Random, Base.Threads, Test
+const ArrayT = try
+  using AMDGPU
+  @info "using AMDGPU"
+  function LinearAlgebra.qr!(A::ROCArray{T, 2, AMDGPU.Runtime.Mem.HIPBuffer}) where T
+    tau = ROCArray{T}(undef, min(size(A)...))
+    return AMDGPU.rocSOLVER.geqrf!(A, tau)
+  end
+  function LinearAlgebra.:\(qrAtau::Tuple{ROCArray{T, 2, AMDGPU.Runtime.Mem.HIPBuffer},
+					  ROCArray{T, 1, AMDGPU.Runtime.Mem.HIPBuffer}},
+                            b::ROCArray{T, 2, AMDGPU.Runtime.Mem.HIPBuffer}) where T
+    qrA, tau = qrAtau
+    m, n = size(qrA)
+    @assert size(b, 1) == m
+    AMDGPU.rocSOLVER.ormqr!('L', 'C', qrA, tau, b)
+    R = view(qrA, 1:n, 1:n)
+    x = view(b, 1:n, :)
+    AMDGPU.rocBLAS.trsm!('L', 'U', 'N', 'N', one(T), R, x)
+    return x
+  end
+  ROCArray
+catch err
+  try
+    using CUDA
+    @info "using CUDA"
+    CuArray
+  catch
+  end
+end
+
+using MPIQR
 using MPI, Distributed, MPIClusterManagers
-const ArrayT = CuArray
 
 MPI.Init(;threadlevel=MPI.THREAD_SERIALIZED)
 const cmm = MPI.COMM_WORLD
@@ -33,8 +60,8 @@ function run(blocksizes=(16,), npows=(10,11,12,13), Ts=(ComplexF64,); bestof=2)
       end
       t1 = minimum(t1s)
       BLAS.set_num_threads(nts)
-      Ac = CuArray(A0)
-      bc = CuArray(b0)
+      Ac = ArrayT(A0)
+      bc = ArrayT(b0)
       tcs = []
       for _ in 1:bestof
         push!(tcs, @elapsed qr!(Ac) \ bc)
@@ -70,7 +97,7 @@ function run(blocksizes=(16,), npows=(10,11,12,13), Ts=(ComplexF64,); bestof=2)
           res = norm(A0' * A0 * Array(x2) .- A0' * b0)
           try
             println("np=$sze, nt=$nts, T=$T, m=$m, n=$n, blocksize=$blocksize:")
-            println("tLAPACK = $t1, tCUDA = $tc, tMPIQR = $t2, ratio_CUDA=$(t2/tc)x, ratio_LAPACK=$(t2/t1)x")
+            println("tLAPACK = $t1, tGPU = $tc, tMPIQR = $t2, ratio_GPU=$(t2/tc)x, ratio_LAPACK=$(t2/t1)x")
             @test res < 1e-8
             println("    PASSED: norm of residual = $res")
           catch err
