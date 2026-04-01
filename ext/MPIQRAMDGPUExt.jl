@@ -60,7 +60,7 @@ function MPIQR.normandscale!(
 
   groupsize = min(256, nextpow(2, m))
   gridsize  = cld(m, groupsize * 4)
-  shmem = sizeof(T) * groupsize
+  shmem = sizeof(real(T)) * groupsize
 
   partial = ROCArray{Float64}(undef, gridsize)
 
