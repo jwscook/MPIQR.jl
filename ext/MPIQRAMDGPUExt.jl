@@ -6,12 +6,13 @@ using AMDGPU
 const HIPBuffer = AMDGPU.Runtime.Mem.HIPBuffer
 
 MPIQR.maybeview(A::ROCArray, args...) = A[args...]
+MPIQR.maybeview(A::ROCArray, rows::UnitRange, cols) = view(A, rows, cols)
+MPIQR.maybeview(A::ROCArray, rows::Base.Slice, cols) = view(A, rows, cols)
 
 function Base.parent(M::Type{SubArray{T, N, ROCArray{T, N, HIPBuffer}, Tuple{U, U}, false}}
     ) where {T<:Number, N, U<:UnitRange{<:Integer}}
   return M.parameters[3]
 end
-
 # ---------------------------------------------------------------------------
 # mul! for transposed subarray times subarray vector
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ function MPIQR.normandscale!(
   v_parent   = parent(v)
   row_offset = first(v.indices[1]) - 1
   col_offset = first(v.indices[2]) - 1
+
   nrows_parent = size(v_parent, 1)
   base_offset  = col_offset * nrows_parent + row_offset
 
@@ -62,7 +64,7 @@ function MPIQR.normandscale!(
   gridsize  = cld(m, groupsize * 4)
   shmem = sizeof(real(T)) * groupsize
 
-  partial = ROCArray{Float64}(undef, gridsize)
+  partial = ROCArray{real(T)}(undef, gridsize)
 
   # Two-pass: partial norms, then finalize + scale
   @roc groupsize=groupsize gridsize=gridsize shmem=shmem norm2_gridsize_subarray!(
@@ -164,31 +166,54 @@ function LinearAlgebra.ldiv!(
   return A
 end
 
-# ---------------------------------------------------------------------------
-# mul! adjoint subarray × subarray  (gemm)
-# ---------------------------------------------------------------------------
+# Helper: get a contiguous-looking ROCArray view into a subarray
+# by wrapping the parent buffer with offset pointer and correct dims
+function strided_rocarray(A::SubArray{T, 2, ROCArray{T, 2, HIPBuffer},
+    Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}) where T
+  parent_A  = parent(A)
+  row_start = first(A.indices[1]) - 1
+  col_start = first(A.indices[2]) - 1
+  lda       = size(parent_A, 1)
+  m         = size(A, 1)
+  n         = size(A, 2)
+  # Offset into the parent buffer (column-major)
+  offset = col_start * lda + row_start
+  # Wrap with correct pointer — rocBLAS sees lda rows, uses only first m
+  ptr = pointer(parent_A) + offset * sizeof(T)
+  return unsafe_wrap(ROCArray, ptr, (lda, n)), m
+end
+
 function LinearAlgebra.mul!(
     y::ROCArray{T, 2, HIPBuffer},
-    Hj_adj::Adjoint{T, SubArray{T, 2, ROCArray{ComplexF64, 2, HIPBuffer}, <:Tuple, false}},
-    H::SubArray{T, 2, ROCArray{T, 2, HIPBuffer}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}
+    Hj_adj::Adjoint{T, SubArray{T, 2, ROCArray{T, 2, HIPBuffer},
+        Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}},
+    H::SubArray{T, 2, ROCArray{T, 2, HIPBuffer},
+        Tuple{UnitRange{Int64}, UnitRange{Int64}}, false}
     ) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
-  AMDGPU.rocBLAS.gemm!('C', 'N', one(T), Hj_adj', H, zero(T), y)
+  Hj_w, mHj = strided_rocarray(Hj_adj')
+  H_w,  mH  = strided_rocarray(H)
+  # view to correct row count so gemm sees the right dimensions
+  AMDGPU.rocBLAS.gemm!('C', 'N', one(T),
+    view(Hj_w, 1:mHj, :),
+    view(H_w,  1:mH,  :),
+    zero(T), y)
   return y
 end
 
-# ---------------------------------------------------------------------------
-# mul! rank-1 update: H -= Hj * z'  (geru)
-# ---------------------------------------------------------------------------
 function LinearAlgebra.mul!(
-    H::SubArray{T, 2, ROCArray{T, 2, HIPBuffer}, Tuple{UnitRange{Int64}, UnitRange{Int64}}, false},
-    Hj::ROCArray{T, 1, HIPBuffer},
+    H::SubArray{T, 2, ROCArray{T, 2, HIPBuffer},
+        Tuple{UnitRange{Int64}, UnitRange{Int64}}, false},
+    Hj::SubArray{T, 2, ROCArray{T, 2, HIPBuffer},
+        Tuple{UnitRange{Int64}, <:Union{UnitRange{Int64}, Base.Slice{Base.OneTo{Int64}}}}, false},
     z::ROCArray{T, 2, HIPBuffer},
-    α::Int, β::Bool) where T<:Union{ComplexF32, ComplexF64}
-
-  @assert α == -1 && β == 1
-  @assert size(z, 1) == 1
-  z_vec = view(z, 1, :)
-  AMDGPU.rocBLAS.geru!(T(-1), Hj, z_vec, H)
+    α::Int, β::Bool) where T<:Union{Float32, Float64, ComplexF32, ComplexF64}
+  H_w,  mH  = strided_rocarray(H)
+  Hj_w, mHj = strided_rocarray(Hj)
+  AMDGPU.rocBLAS.gemm!('N', 'N', T(α),
+    view(Hj_w, 1:mHj, :),
+    z,
+    T(β),
+    view(H_w, 1:mH, :))
   return H
 end
 
