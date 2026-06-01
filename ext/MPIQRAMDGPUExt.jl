@@ -91,7 +91,7 @@ function norm2_gridsize_subarray!(v_parent, partial, m, offset)
   tid = workitemIdx().x
   idx = (workgroupIdx().x - 1) * workgroupDim().x * 4 + tid
   shared = @ROCDynamicLocalArray(Float64, workgroupDim().x)
-  acc = 0.0
+  acc = zero(real(eltype(v_parent)))
   for i in 0:3
     @inbounds if idx + i * workgroupDim().x <= m
       acc += abs2(v_parent[offset + idx + i * workgroupDim().x])
@@ -108,7 +108,7 @@ end
 function finalize_normandscale_subarray!(v_parent, α, j, partial, m, offset)
   tid = workitemIdx().x
   shared = @ROCDynamicLocalArray(Float64, workgroupDim().x)
-  acc = 0.0
+  acc = zero(eltype(partial))
   i = tid
   len = length(partial)
   @inbounds while i <= len

@@ -100,7 +100,7 @@ function norm2_blocks_subarray!(v_parent, partial, m, offset)
   shared = @cuDynamicSharedMem(Float64, blockDim().x)
 
   # Process 4 elements per thread (loop unrolling)
-  acc = 0.0
+  acc = zero(real(eltype(v_parent)))
   for i in 0:3
     @inbounds if idx + i * blockDim().x <= m
       acc += abs2(v_parent[offset + idx + i * blockDim().x])
@@ -135,7 +135,7 @@ function finalize_normandscale_subarray!(v_parent, α, j, partial, m, offset)
   shared = @cuDynamicSharedMem(Float64, blockDim().x)
 
   # Grid-stride loop for partial reduction
-  acc = 0.0
+  acc = zero(eltype(partial))
   i = tid
   len = length(partial)
   @inbounds while i <= len
