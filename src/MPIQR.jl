@@ -347,6 +347,7 @@ end
 
 function LinearAlgebra.ldiv!(x::AbstractVecOrMat, H::MPIQRStruct, b::AbstractVecOrMat;
     progress=FakeProgress(), verbose=false)
+  x === b && return ldiv!(x, H; progress=progress, verbose=verbose)
   c = deepcopy(b) # TODO: make this ...
   solve_householder!(c, H.A, H.α; progress=progress, verbose=verbose)
   x .= view(c, axes(x, 1), :) # .. and there this better
