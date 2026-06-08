@@ -312,7 +312,7 @@ function solve_householder!(b, H, α; progress=FakeProgress(), verbose=false)
   end
   ts = (ta, tb, tc, td, te)
   verbose && println(sum(ts), " s: %s ", trunc.(100 .* ts ./ sum(ts), sigdigits=3))
-  return b[1:n, :]
+  return view(b, 1:n, :)
 end
 
 struct MPIQRStruct{T,M,Tα} <: AbstractMatrix{T}
