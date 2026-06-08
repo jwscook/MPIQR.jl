@@ -1,4 +1,4 @@
-# QRMPI.jl: QR factorisation distributed over MPI
+# MPIQR.jl: QR factorisation distributed over MPI
 
 QR factorise your MPI distributed matrix using Householder reflections and then solve your square or least square problem.
 
