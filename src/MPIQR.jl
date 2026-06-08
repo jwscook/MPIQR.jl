@@ -215,48 +215,89 @@ function hotloop!(H::AbstractMatrix, work)
   return nothing
 end
 
-function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H, 2)), 0); verbose=false,
-    progress=FakeProgress()) where T
+function householder!(H::MPIQRMatrix{T}, α=fill!(similar(H.localmatrix, size(H, 2)), 0);
+    verbose=false, progress=FakeProgress()) where T
   m, n = size(H)
   @assert m >= n
   bs = blocksize(H) # the blocksize / tilesize of contiguous columns on each rank
-  t1 = t2 = t3 = t4 = t5 = t6 = t7 = 0.0
+  t1 = t2 = t3 = t4 = t5 = t6 = t7 = t8 = 0.0
   # work array for the BLAS call
   work = (Hj = similar(H.localmatrix, m, bs), # the H column(s)
+          Hc = similar(H.localmatrix, m, bs), # the H column(s)
           y = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           z = similar(H.localmatrix, bs, localcolsize(H, 1:n)),
           dots = similar(H.localmatrix, bs, bs),
           coeffs = similar(H.localmatrix, bs, bs))
+
+  buffer = similar(H.localmatrix, m * bs) # Communication buffer
+
+  # STAGE 0: Get first block to all ranks (blocking)
+  colowner = columnowner(H, 1)
+  H.rank == colowner && copyto!(work.Hc, view(H, :, 1:bs))
+  MPI.Bcast!(work.Hc, H.comm; root=colowner)
+
   @inbounds @views for j in 1:bs:n
     colowner = columnowner(H, j)
-    bz = min(bs, n - j + 1)
-    # process all the first bz column(s) of H
-    if H.rank == colowner
-      fill!(view(work.Hj, j:j-1+bz, :), 0) # make sure that the work array has zeros where it needs it
-      @inbounds for Δj in 0:bz-1
-        v = view(H, j+Δj:m, j + Δj)
-        t1 += @elapsed s = sqrt.(sum(abs2, v; dims=1)) # norm(v) # expensive
-        t2 += @elapsed view(α, j + Δj) .= s .* alphafactor.(view(v, 1))
-        t2 += @elapsed f = 1 ./ sqrt.(s .* (s .+ abs.(view(v, 1))))
-        t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
-        t3 += @elapsed v .*= f
-        # Copy trailing columns to separate buffer to avoid aliasing
-        t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1+Δj:1+Δj), v) # can't have H on both sides of mul!
-        t5 += @elapsed hotloop!(view(H, j+Δj:m, j+Δj:j-1+bz), # v and trailing columns
-                                (Hj = view(work.Hj, j+Δj:m, 1+Δj:1+Δj), # copy of v
-                                 y = view(work.dots, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
-                                 z = view(work.coeffs, 1:1, 1+Δj:bz), # indexing 1:1 dispatches to BLAS
-                                 dots = nothing, coeffs = nothing)) # not needed
+    ba = min(bs, n - j + 1) # ba is this block size
+    bb = min(ba, n - j + 1 - ba) # bb is the next block size
+    @assert ba > 0 && ba >= bb && bb >= 0
+    # process all the first ba column(s) of H
+    fill!(view(work.Hj, j:j-1+ba, :), 0) # make sure that the work array has zeros where it needs it
+    # STAGE 1: All ranks process current block
+    @inbounds for Δj in 0:ba-1
+      v = H.rank == colowner ? view(H, j+Δj:m, j+Δj) : view(work.Hc, j+Δj:m, 1 + Δj)
+      t1 += @elapsed s = sqrt.(sum(abs2, v; dims=1)) # norm(v) # expensive
+      t2 += @elapsed view(α, j + Δj) .= s .* alphafactor.(view(v, 1))
+      t2 += @elapsed f = 1 ./ sqrt.(s .* (s .+ abs.(view(v, 1))))
+      t2 += @elapsed view(v, 1) .-= view(α, j + Δj)
+      t3 += @elapsed v .*= f
+      # Copy trailing columns to separate buffer to avoid aliasing
+      t4 += @elapsed copyto!(view(work.Hj, j+Δj:m, 1+Δj:1+Δj), v) # can't have H on both sides of mul!
+      t5 += @elapsed hotloop!(
+        H.rank == colowner ? view(H, j+Δj:m, j+Δj:j-1+ba) : view(work.Hc, j+Δj:m, 1+Δj:ba), # v and trailing columns
+        (Hj = view(work.Hj, j+Δj:m, 1+Δj:1+Δj), # copy of v
+         y = view(work.dots, 1:1, 1+Δj:ba), # indexing 1:1 dispatches to BLAS
+         z = view(work.coeffs, 1:1, 1+Δj:ba), # indexing 1:1 dispatches to BLAS
+         dots = nothing, coeffs = nothing)) # not needed
+    end
+
+    # STAGE 2: All ranks apply current block to "near" columns (next block region)
+    t5 += @elapsed hotloop!(H, work, j:m, (j + ba):(j - 1 + ba + bb))
+
+    # STAGE 3: Initiate non-blocking comms for the next column block
+    reqs = Vector{MPI.Request}()
+    t6 += @elapsed if j + ba <= n
+      resize!(buffer, (m - (j - 1 + ba)) * bb)
+      src = columnowner(H, j + ba)
+      if H.rank == src
+        # Pack and send next block (non-blocking)
+        @inbounds copyto!(buffer, reshape(view(H, j+ba:m, j+ba:j-1+ba+bb), length(buffer)))
+        for r in filter(!=(src), 0:H.commsize-1)
+          push!(reqs, MPI.Isend(buffer, H.comm; dest=r, tag=j))
+        end
+      else
+        # Post receive for next block (non-blocking)
+        push!(reqs, MPI.Irecv!(buffer, H.comm; source=src, tag=j))
       end
     end
-    t6 += @elapsed MPI.Bcast!(view(work.Hj, j:m, 1:bz), H.comm; root=colowner) # blocking
-    # now do the rest of the columns from j + bz to the right
-    t7 += @elapsed hotloop!(H, work, j:m, (j + bz):n) # expensive
+
+    # STAGE 4: All ranks apply current block to "far" columns
+    t7 += @elapsed hotloop!(H, work, j:m, (j + ba + bb):n)
+
+    # STAGE 5: Wait for next block data and unpack into work.Hc
+    t8 += @elapsed if j + ba <= n
+      MPI.Waitall(reqs)
+      viewHc = view(work.Hc, j+ba:m, 1:bb)
+      linearviewHc = reshape(viewHc, length(buffer))
+      copyto!(linearviewHc, buffer)
+      empty!(reqs)
+    end
+
     next!(progress)
   end
-  ts = (t1, t2, t3, t4, t5, t6, t7)
+  ts = (t1, t2, t3, t4, t5, t6, t7, t8)
   verbose && println(sum(ts), "s: %s ", trunc.(100 .* ts ./ sum(ts), sigdigits=3))
-  MPI.Allreduce!(α, +, H.comm)
+
   return MPIQRStruct(H, α)
 end
 
